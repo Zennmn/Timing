@@ -9,6 +9,7 @@ import numpy as np
 from numba import njit
 
 from .config import MODELS
+from .device import require_gpu, empty_cache
 from .schema import Unit
 from .text import tokenize, kept
 from .singing import japanese_acoustic_parts, pronunciation_overrides
@@ -129,20 +130,18 @@ class CtcAligner:
         from transformers import AutoModelForCTC, AutoFeatureExtractor
         if not ready():
             raise RuntimeError("MMS CTC 模型未下载完整，请运行 scripts/download_ctc.py。")
-        if not torch.cuda.is_available():
-            raise RuntimeError("MMS 对齐需要 CUDA GPU。")
+        self.device = require_gpu("MMS 对齐")
         self.log("加载本地 MMS-300M 多语 CTC 对齐模型…")
         self.model = AutoModelForCTC.from_pretrained(str(CTC_DIR), local_files_only=True,
-                                                    dtype=torch.float32, attn_implementation="sdpa").to("cuda").eval()
+                                                    dtype=torch.float32, attn_implementation="sdpa").to(self.device).eval()
         self.extractor = AutoFeatureExtractor.from_pretrained(str(CTC_DIR), local_files_only=True)
         self.vocab = json.loads((CTC_DIR / "vocab.json").read_text(encoding="utf-8"))
         self.inverse = {value: key for key, value in self.vocab.items()}
 
     def release(self):
-        import torch
         self.model, self.extractor = None, None
         gc.collect()
-        torch.cuda.empty_cache()
+        empty_cache()
 
     def align(self, samples, line, syllables=True, *, sample_rate=16000, prepared=None):
         import torch
@@ -169,7 +168,7 @@ class CtcAligner:
         wave = np.asarray(samples,dtype=np.float32) if sample_rate == 16000 else resample_poly(samples,16000//factor,sample_rate//factor).astype("float32")
         if not 400 <= len(wave) <= 30*16000:
             raise ValueError("MMS 单句音频需在25毫秒到30秒之间，请检查 LRC 范围。")
-        inputs = self.extractor(wave, sampling_rate=16000, return_tensors="pt").to("cuda")
+        inputs = self.extractor(wave, sampling_rate=16000, return_tensors="pt").to(self.device)
         with torch.inference_mode():
             logits = self.model(**inputs).logits[0].float()
             log_probs = logits.log_softmax(-1).cpu().numpy()

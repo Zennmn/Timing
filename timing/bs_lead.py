@@ -11,6 +11,7 @@ import soundfile as sf
 
 from .config import MODELS
 from .audio import validate_stems
+from .device import require_gpu, empty_cache
 
 FOLDER = MODELS / "bs-karaoke"
 CHECKPOINT = "bs_roformer_karaoke_frazer_becruily.ckpt"
@@ -31,8 +32,7 @@ def separate(source: Path, output_dir: Path, log=print):
 
     if not ready():
         raise RuntimeError("BS-Karaoke 模型未就绪，请运行 scripts/download_bs_karaoke.py。")
-    if not torch.cuda.is_available():
-        raise RuntimeError("主唱分离需要 CUDA GPU。")
+    device = require_gpu("主唱分离")
     manifest = json.loads((FOLDER / "assets.json").read_text(encoding="utf-8"))
     # Fail closed if the checkpoint or executable runtime was altered.
     for relative, asset in manifest["assets"].items():
@@ -54,9 +54,9 @@ def separate(source: Path, output_dir: Path, log=print):
     model = BSRoformer(**cfg["model"])
     try:
         model.load_state_dict(torch.load(FOLDER / CHECKPOINT, map_location="cpu", weights_only=True), strict=True)
-        model.cuda().eval()
+        model.to(device).eval()
         wave, rate = sf.read(mix_path, dtype="float32", always_2d=True)
-        sources, _ = demix_track(config, model, torch.from_numpy(wave.T.copy()), "cuda")
+        sources, _ = demix_track(config, model, torch.from_numpy(wave.T.copy()), device)
         lead = sources["Vocals"]
         if lead.ndim == 3:
             lead = lead[0]
@@ -78,4 +78,4 @@ def separate(source: Path, output_dir: Path, log=print):
         model.cpu()
         del model
         gc.collect()
-        torch.cuda.empty_cache()
+        empty_cache()

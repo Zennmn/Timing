@@ -2,11 +2,13 @@
 import gc
 import json
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 import soundfile as sf
 
 from .config import SEPARATOR_DIR, SEPARATOR_NAME
+from .device import require_gpu, empty_cache
 
 
 def separator_ready():
@@ -16,12 +18,41 @@ def separator_ready():
         checkpoint.stat().st_size == 913106900 and (folder / "config_vocals_mel_band_roformer.yaml").is_file()
 
 
+@contextmanager
+def _on_mps(device):
+    """Run melband-roformer-infer on MPS, which it does not support itself.
+
+    It refuses "mps" when it resolves the device, and MelBand averages its
+    complex masks with scatter_add_, which MPS lacks for complex tensors. The
+    sum is linear, so the real and imaginary parts are scattered separately.
+    """
+    if device != "mps":
+        yield
+        return
+    import torch
+    from mel_band_roformer import inference
+    resolve, scatter_add_ = inference._resolve_device, torch.Tensor.scatter_add_
+
+    def complex_scatter_add_(self, dim, index, src, **kwargs):
+        if self.is_complex() and self.device.type == "mps":
+            real = self.real.scatter_add(dim, index, src.real)
+            imag = self.imag.scatter_add(dim, index, src.imag)
+            return self.copy_(torch.complex(real, imag))
+        return scatter_add_(self, dim, index, src, **kwargs)
+
+    inference._resolve_device = lambda requested: torch.device("mps") if str(requested) == "mps" else resolve(requested)
+    torch.Tensor.scatter_add_ = complex_scatter_add_
+    try:
+        yield
+    finally:
+        inference._resolve_device, torch.Tensor.scatter_add_ = resolve, scatter_add_
+
+
 def separate_vocals(source: Path, output_dir: Path, log=print):
     import torch
     from mel_band_roformer import MelBandRoformerSession, ensure_model_assets
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("自动人声分离需要 CUDA GPU，请先运行 setup.ps1。")
+    device = require_gpu("自动人声分离")
     if not separator_ready():
         raise RuntimeError("人声分离模型尚未下载完整，请运行 scripts/download_separator.py。")
     # download_missing=False is deliberate: user audio never triggers downloads.
@@ -40,11 +71,12 @@ def separate_vocals(source: Path, output_dir: Path, log=print):
     input_info = sf.info(mix)
     log("加载 MelBand RoFormer Kim 人声模型…")
     session = MelBandRoformerSession(model_name=SEPARATOR_NAME, model_path=checkpoint,
-                                     config_path=config, device="cuda:0", progress=False)
+                                     config_path=config, device=device, progress=False)
     try:
-        session.load()
-        log("正在 GPU 分离人声与伴奏…")
-        manifest = session.infer(inputs, store_dir=outputs, output_format="wav_float32")
+        with _on_mps(device):
+            session.load()
+            log("正在 GPU 分离人声与伴奏…")
+            manifest = session.infer(inputs, store_dir=outputs, output_format="wav_float32")
         vocal_outputs = [Path(entry["output_path"]) for entry in manifest if entry["output_id"] == "vocals"]
         if len(vocal_outputs) != 1:
             raise RuntimeError("分离器未返回唯一的人声轨。")
@@ -60,9 +92,9 @@ def separate_vocals(source: Path, output_dir: Path, log=print):
         (output_dir / "separation.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
         log("人声分离完成，释放分离模型显存，开始打轴。")
         return result, info
-    except torch.cuda.OutOfMemoryError as exc:
+    except torch.OutOfMemoryError as exc:
         raise RuntimeError("人声分离显存不足，请关闭占用显存的程序，或选择“直接使用音轨”后重试。") from exc
     finally:
         session.close()
         gc.collect()
-        torch.cuda.empty_cache()
+        empty_cache()

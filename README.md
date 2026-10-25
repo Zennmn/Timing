@@ -6,9 +6,9 @@
 
 ## 安装与启动
 
-支持并验证的环境：Windows 11、PowerShell 7、NVIDIA CUDA GPU、Python 3.12。当前 CUDA 12.8 依赖配置在 RTX 5070 Ti 16 GB 上验证；其他硬件的显存需求未建立统一下限。
+支持并验证的环境：Windows 11、PowerShell 7、NVIDIA CUDA GPU、Python 3.12。当前 CUDA 12.8 依赖配置在 RTX 5070 Ti 16 GB 上验证；其他硬件的显存需求未建立统一下限。macOS 的 Apple 芯片（MPS）另有安装脚本，见下文“macOS（Apple 芯片）”。
 
-下载并解压源码到可写文件夹，然后双击 **安装.cmd**。它会检查 PowerShell 7；缺失时可通过 WinGet 安装，再引导安装 uv、FFmpeg 和 Git。安装器保留各工具的协议和权限提示，按提示完成后继续。系统没有 WinGet 时会给出官方安装地址。NVIDIA 驱动需要提前安装；当前版本不支持 CPU、AMD 或 Apple GPU 的安装流程。
+下载并解压源码到可写文件夹，然后双击 **安装.cmd**。它会检查 PowerShell 7；缺失时可通过 WinGet 安装，再引导安装 uv、FFmpeg 和 Git。安装器保留各工具的协议和权限提示，按提示完成后继续。系统没有 WinGet 时会给出官方安装地址。NVIDIA 驱动需要提前安装；当前版本不支持 CPU 或 AMD 的安装流程。
 
 安装顺序是：检查系统与 NVIDIA 驱动 → 检查工具 → 创建 Python 3.12 环境并安装锁定依赖 → 验证真实 CUDA 运算 → 下载和校验五组模型。CUDA 未通过时不会下载模型。Python 和 PyTorch 首次下载较大；五组模型当前本机约 4.27 GiB，Python、缓存、临时文件和歌曲输出还需额外空间。
 
@@ -23,6 +23,12 @@ setup.ps1 默认安装全部五组必需模型（MMS、TIFA、SOFA、BS 主唱�
 只检查环境、不安装依赖或下载模型：`pwsh.exe -NoProfile -File setup.ps1 -CheckOnly`。安装失败时会显示当前阶段和日志位置；安装记录保存在 `.runtime/install/`。重试时复用已完成的文件和下载缓存；服务器支持分段请求时可续传未完成的 HTTP 文件，不支持时会重新下载该文件。请先关闭正在运行的 Timing 再安装，防止修改运行中的 Python 环境。排错和手动依赖安装见 [安装说明](docs/installation.md)。
 
 双击 启动.cmd，或运行 pwsh.exe -File start.ps1，打开 [本机页面](http://127.0.0.1:7861)。双击 停止.cmd 关闭服务。
+
+### macOS（Apple 芯片）
+
+在 M4 Max（64 GB 统一内存）、macOS 27 上验证。先用 Homebrew 安装工具：`brew install uv ffmpeg git`，然后在源码目录运行 `./setup.sh`，或在访达中双击 **安装.command**。顺序与 Windows 相同：检查工具 → 创建 Python 3.12 环境 → 验证真实 MPS 运算 → 下载和校验五组模型；MPS 未通过时不会下载模型。`./setup.sh --skip-models` 跳过模型步骤，`./setup.sh --check-only` 只检查。`./start.sh`（或双击 **启动.command**）打开本机页面，`./stop.sh`（或 **停止.command**）关闭服务。
+
+模型默认在 Apple GPU 上运行；`TIMING_DEVICE=cpu` 可强制使用 CPU（很慢）。在 Apple GPU 上，“只保留主唱”的 BS-Roformer 较慢（一首约 4 分钟的歌需 6–8 分钟），“保留全部人声”的 Kim 模型连同打轴约 3 分钟，“直接使用所选音轨”约 1.5–2 分钟。
 
 ## 使用
 

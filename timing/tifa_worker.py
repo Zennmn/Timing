@@ -145,6 +145,7 @@ def main():
     root = Path(__file__).resolve().parent.parent
     sys.path[:0] = [str(model_dir / "deps"), str(model_dir / "runtime"), str(root)]
     import torch
+    from timing.device import device, reset_peak_memory, peak_memory_gib
     from inference.api import load_inference_model, load_g2p_config
     from inference.data import AudioTextDataset
     from lib.path_traversal import materialize_paths
@@ -164,7 +165,18 @@ def main():
     result_path = request_path.with_name("raw.json")
     with contextlib.redirect_stdout(sys.stderr):
         backend, vocabulary, config = load_inference_model(model_dir / "model.pt", scope=ConfigurationScope.FA)
-    backend = backend.cuda().eval()
+    backend = backend.to(device()).eval()
+    if device() == "mps":
+        # MPS has no int64 scatter_reduce; TIFA's scoring uses it only on small
+        # index tensors, so those calls run on the CPU.
+        scatter_reduce = torch.Tensor.scatter_reduce
+
+        def cpu_int64_scatter_reduce(self, dim, index, src, reduce, **kwargs):
+            if self.device.type == "mps" and self.dtype == torch.int64:
+                return scatter_reduce(self.cpu(), dim, index.cpu(), src.cpu(), reduce, **kwargs).to(self.device)
+            return scatter_reduce(self, dim, index, src, reduce, **kwargs)
+
+        torch.Tensor.scatter_reduce = cpu_int64_scatter_reduce
     cfg = yaml.safe_load((model_dir / "config.yaml").read_text(encoding="utf-8"))["inference"]["g2p"]
     from timing.tifa_pronunciation import ensure_apostrophes_registered, APOSTROPHE_PREPROCESSOR_ID
     ensure_apostrophes_registered()
@@ -230,7 +242,7 @@ def main():
                               vocabulary=vocabulary, audio_sample_rate=backend.sample_rate,
                               language=languages, oov_handling="raise")
     started = time.monotonic()
-    torch.cuda.reset_peak_memory_stats()
+    reset_peak_memory()
     results = []
     clips_by_id = {clip['id']:clip for clip in request['clips']}
     with torch.inference_mode():
@@ -248,7 +260,7 @@ def main():
                 raise ValueError(item.get("error") or item.get("warning") or "TIFA omitted an input")
             texts, shared_marks = restore_silent_marks(sources[item["identifier"]], item["texts"])
             batch = dataset.collate([item])
-            batch = {key: value.cuda() if isinstance(value, torch.Tensor) else value for key, value in batch.items()}
+            batch = {key: value.to(device()) if isinstance(value, torch.Tensor) else value for key, value in batch.items()}
             spec = backend.spectrogram(batch["waveform"], batch["duration"])
             scored = backend.score(spec, paths=batch["paths"], words=batch["words"],
                                    candidates=batch["candidates"], unit="levenshtein")
@@ -294,7 +306,7 @@ def main():
             result_path.write_text(json.dumps({"results":results}, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f'TIFA {index+1}/{len(dataset)} {item["identifier"]}', flush=True)
     result_path.write_text(json.dumps({"results":results, "languages":languages, "seconds":time.monotonic()-started,
-                           "peak_torch_allocated_gib":torch.cuda.max_memory_allocated()/2**30,
+                           "peak_torch_allocated_gib":peak_memory_gib(),
                            "pronunciation_overrides":{"ja":overrides["ja"] if "ja" in languages else {},
                                                       "zh":overrides.get('zh', {}) if 'zh' in languages else {},
                                                       "en":overrides["en"] if "en" in languages else {}}},

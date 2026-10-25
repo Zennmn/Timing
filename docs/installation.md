@@ -11,6 +11,14 @@
 
 首次安装需要访问 Python / PyTorch 下载源、GitHub 和 Hugging Face。模型目录当前约 4.27 GiB，Python、CUDA 运行依赖、下载缓存和输出另计。请留足磁盘空间并保持网络连接。无需手动给系统安装 CUDA Toolkit；安装器使用锁定的 PyTorch 依赖，最终以实际 GPU 运算检查为准。
 
+## macOS（Apple 芯片）
+
+1. 需要 M 系列芯片的 Mac；Intel Mac 没有 MPS。用 Homebrew 安装工具：`brew install uv ffmpeg git`。
+2. 在源码目录运行 `./setup.sh`，或在访达中双击 **安装.command**。PyTorch 使用 PyPI 的 macOS 版本（与 CUDA 版同为 2.11.0），不需要 CUDA 下载源。
+3. 真实 MPS 运算检查通过后才下载五组模型；完成后运行 `./start.sh` 或双击 **启动.command**。
+
+PyTorch 在 MPS 上缺少的两种运算由 Timing 绕开：TIFA 打分中的 int64 `scatter_reduce` 改在 CPU 上计算（只涉及很小的索引张量），Kim 人声模型对复数掩码的 `scatter_add_` 改为实部、虚部分别累加。服务记录写在 `.runtime/server.log` 与 `.runtime/server-error.log`。
+
 ## 没有 WinGet
 
 在 Microsoft Store 安装或更新“应用安装程序”，或自行准备下面的工具。手动安装结束后重新打开安装窗口，让新 PATH 生效。

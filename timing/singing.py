@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 from .config import MODELS, ROOT
+from .device import device, empty_cache
 from .schema import Unit
 from .text import kept, tokenize, SMALL
 from .english_syllables import split_english, split_flags, prepare_llm_many, current_method, word_flags
@@ -352,12 +353,11 @@ class SingingAligner:
         self.native_models = {}
 
     def release(self):
-        import torch
         for model in self.native_models.values():
             model.cpu()
         self.native_models.clear()
         gc.collect()
-        torch.cuda.empty_cache()
+        empty_cache()
 
     def _align_native(self, wave, lines, units, owners, sequence, unit_map, language):
         """Call upstream SOFA's complete single-language inference on one clip."""
@@ -370,7 +370,7 @@ class SingingAligner:
             state = torch.load(checkpoint, map_location="cpu", weights_only=False)
             model = LitForcedAlignmentTask(**state["hyper_parameters"])
             model.load_state_dict(state["state_dict"])
-            model = model.to("cuda").eval()
+            model = model.to(device()).eval()
             model.on_predict_start()
             self.native_models[language] = model
         model = self.native_models[language]
@@ -380,7 +380,7 @@ class SingingAligner:
             raise ValueError(f"{language} 读音包含模型不支持的音素：{missing}")
         duration = len(wave) / 44100
         with torch.inference_mode():
-            mel = model.get_melspec(torch.from_numpy(wave).to("cuda")).unsqueeze(0)
+            mel = model.get_melspec(torch.from_numpy(wave).to(device())).unsqueeze(0)
             mel = (mel-mel.mean()) / mel.std().clamp_min(1e-6)
             mel = repeat(mel, "B C T -> B C (T N)", N=model.melspec_config["scale_factor"])
             ph_seq, ph_bounds, word_seq, word_bounds, confidence, _, _ = model._infer_once(
@@ -442,7 +442,7 @@ class SingingAligner:
                 state = torch.load(checkpoint, map_location="cpu", weights_only=False)
                 model = LitForcedAlignmentTask(**state["hyper_parameters"])
                 model.load_state_dict(state["state_dict"]); del state
-                model = model.to("cuda").eval()
+                model = model.to(device()).eval()
                 model.on_predict_start()
                 missing = [phone[1] for phone in vocab if phone[0] == language and phone[1] not in model.vocab]
                 if missing:
@@ -462,7 +462,7 @@ class SingingAligner:
                     for first in range(0, frames, core):
                         last = min(frames, first + core)
                         left, right = max(0, first - context), min(frames, last + context)
-                        audio = torch.from_numpy(wave[left*frame_hop:right*frame_hop]).to("cuda")
+                        audio = torch.from_numpy(wave[left*frame_hop:right*frame_hop]).to(device())
                         with torch.inference_mode():
                             mel = model.get_melspec(audio).unsqueeze(0)
                             mel = (mel - mel.mean()) / mel.std().clamp_min(1e-6)
@@ -483,7 +483,7 @@ class SingingAligner:
                     emissions[:, vocab[phone]] = sub[:, native_ids.index(native_id)]
                 edges.append(edge_all)
                 # Keep the last lightweight module as decoder, release GPU weights.
-                model.cpu(); torch.cuda.empty_cache(); gc.collect()
+                model.cpu(); empty_cache(); gc.collect()
             # Either expert can recognize a non-vocal frame. Requiring both
             # experts to call it silence stretched words into instrumental tails.
             emissions[:, 0] = np.maximum.reduce(blanks)
@@ -524,4 +524,4 @@ class SingingAligner:
         finally:
             if model is not None:
                 model.cpu()
-            gc.collect(); torch.cuda.empty_cache()
+            gc.collect(); empty_cache()

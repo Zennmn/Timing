@@ -48,14 +48,19 @@ include = ["timing*"]
 [tool.setuptools.package-data]
 timing = ["prompts/*.txt", "resources/*.txt"]
 
+[tool.uv]
+# Keep macOS on the torch release the CUDA builds use, so torchaudio matches it.
+constraint-dependencies = ["torch==2.11.0; sys_platform == 'darwin'"]
+
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu128" }
-torchaudio = { index = "pytorch-cu128" }
+# CUDA wheels on Windows and Linux; macOS has no CUDA build and takes PyPI's (Apple GPU via MPS).
+torch = [{ index = "pytorch-cu128", marker = "sys_platform != 'darwin'" }]
+torchaudio = [{ index = "pytorch-cu128", marker = "sys_platform != 'darwin'" }]
 melband-roformer-infer = { git = "https://github.com/openmirlab/melband-roformer-infer.git", rev = "55e4217935da91aee0f2f7ac44cbad512a3485ac" }
 
 [tool.pytest.ini_options]
