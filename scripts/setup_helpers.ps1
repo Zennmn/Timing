@@ -133,6 +133,9 @@ function Invoke-TimingSetup {
                 $stage = 'gpu'
                 $code = Invoke-TimingCommand $python @('-X', 'utf8', 'scripts/verify_gpu.py', '--output', (Join-Path $folder 'gpu.json'))
                 if ($code -ne 0) { throw 'CUDA 运算检查未通过，请查看上面的说明与 gpu.json。检查模式没有修改 Python 环境或模型。' }
+                $stage = 'dictionary'
+                $code = Invoke-TimingCommand $python @('-X', 'utf8', 'scripts/download_unidic.py', '--check-only')
+                if ($code -ne 0) { throw '日语 UniDic 2025.12 词典未准备完整，请运行正式安装。检查模式未下载文件。' }
             } else { Write-Host '基础条件通过；尚未创建 Python 环境，正式安装时会继续验证 CUDA。' }
             Set-TimingInstallState $folder 'check' 'complete' '环境检查完成；未安装依赖或下载模型。'
             Write-Host '检查完成。正式安装请双击 安装.cmd。' -ForegroundColor Green
@@ -156,11 +159,17 @@ function Invoke-TimingSetup {
         $code = Invoke-TimingCommand $python @('-X', 'utf8', 'scripts/verify_gpu.py', '--output', (Join-Path $folder 'gpu.json'))
         if ($code -ne 0) { throw 'CUDA 运算检查失败，已在下载模型前停止。请按上面的原因修复驱动 / Python 环境后重试。' }
 
+        $stage = 'dictionary'
+        Set-TimingInstallState $folder $stage 'running' '正在下载 / 校验日语 UniDic 2025.12 词典。'
+        Write-Host '下载 / 校验 UniDic 2025.12（日语词库约 664 MB 下载，解压后约 1.1 GiB）'
+        $code = Invoke-TimingCommand $python @('-X', 'utf8', 'scripts/download_unidic.py')
+        if ($code -ne 0) { throw '日语词典安装未完成。已有模型和歌曲保留，请检查网络与日志后重试。' }
+
         $stage = 'models'
-        if ($SkipModels) { Write-Host '[5/5] 按参数跳过模型安装；应用仍需要五组模型才能完整使用。' }
+        if ($SkipModels) { Write-Host '[5/5] 按参数跳过模型安装；应用仍需要四组模型才能完整使用。' }
         else {
-            Set-TimingInstallState $folder $stage 'running' '正在下载和校验五组模型。'
-            Write-Host '[5/5] 下载 / 校验五组模型（本机约 4.27 GiB，Python 和缓存另计）'
+            Set-TimingInstallState $folder $stage 'running' '正在下载和校验四组模型。'
+            Write-Host '[5/5] 下载 / 校验四组模型（已有缓存会直接复用，磁盘占用以模型清单为准）'
             $code = Invoke-TimingCommand $python @('-X', 'utf8', 'scripts/download_models.py')
             if ($code -ne 0) { throw '模型安装未完成。已完成的文件保留，请查看模型日志后重新双击 安装.cmd 继续。' }
         }

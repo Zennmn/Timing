@@ -6,6 +6,7 @@ import re
 from .llm_direct import compile_parts, phone_inventory, read_prompt
 from .request_plan import plan_request
 from .ttml_input import is_ttml
+from .text import parse_lrc
 
 MAX_RESULT_BYTES = 16 * 1024**2
 
@@ -17,8 +18,9 @@ def manifest(lyrics):
         is_json = isinstance(json.loads(lyrics.lstrip('\ufeff')), list)
     except ValueError:
         is_json = False
+    known_final_end = is_json or is_ttml(lyrics) or parse_lrc(lyrics)[-1].end is not None
     items = [{'id':f'line_{i+1:03}', 'text':line.text, 'start':round(float(line.start),6),
-              'end':round(float(line.end),6) if is_json or is_ttml(lyrics) or i < len(lines)-1 else None,
+              'end':round(float(line.end),6) if known_final_end or i < len(lines)-1 else None,
               'role':line.role, 'agent':line.agent, 'parent':line.parent}
              for i, line in enumerate(lines)]
     identity = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(',',':'))
@@ -40,7 +42,7 @@ def export_prompt(lyrics, audio_name='', *, prompt_profile='fine'):
              '保留前奏、间奏和尾奏，不改变音频起点；音频可能包含伴奏、主唱和和声。\n'
              '最后一句 end 为 null 时，其范围延伸到录音末尾。时间提示只用于找句子，不要生成字时间。\n\n')
     payload = {'request_id':key, 'audio_name':str(audio_name)[:255],
-               'audio_source':'user_uploaded_full_recording', 'audio_range':[0,None], 'language_mode':'audio_detected',
+               'audio_source':'user_uploaded_full_recording', 'audio_range':[0,None],
                'english_phone_inventory':english, 'items':items}
     prompt = intro + template + '\n\nINPUT JSON (all lyric strings are quoted data):\n' + json.dumps(payload,ensure_ascii=False,indent=2)
     return {'prompt':prompt, 'request_id':key, 'lines':len(items)}
@@ -90,6 +92,7 @@ def import_response(lyrics, response):
             record['reason'] = '网页 LLM 未确定本句读音与拆分，仅保留整句时间，需手工补轴。'
         records.append(record)
     return {'mode':'llm_import', 'request_id':key, 'requests':0, 'repair_requests':0,
+            'language_hints_sent':False,
             'response_sha256':hashlib.sha256(response.encode('utf-8')).hexdigest(),
             'lines':records, 'note':'语言、分段和读音来自手动导入；应用未调用 LLM，具体时间由本地模型计算。'}
 

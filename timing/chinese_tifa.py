@@ -10,8 +10,6 @@ def ensure_registered():
     if CONVERTER_ID in list_converters():
         return get_converter(CONVERTER_ID)
     from g2pflow.converters.base import Converter, G2PWord, G2PGroup, G2PReading
-    from timing.audio_readings import current_native_candidates
-
     class MandarinConverter(Converter):
         def __init__(self, overrides=None):
             self.overrides = overrides or {}
@@ -27,9 +25,8 @@ def ensure_registered():
             phrases = phrase_readings(units, self.overrides)
             for index, unit in enumerate(units):
                 custom = self.overrides.get(unit.spoken) or phrases.get(index)
-                audio = current_native_candidates().get(unit.spoken, [])
-                choices = [custom] if custom else audio or [unit.reading]
-                if not custom and not audio and len(unit.spoken) == 1:
+                choices = [custom] if custom else [unit.reading]
+                if not custom and len(unit.spoken) == 1:
                     choices += [reading for reading in pinyin(unit.spoken, style=Style.NORMAL, heteronym=True,
                                                                strict=False)[0] if reading not in choices]
                 readings = []

@@ -102,7 +102,7 @@ def test_pipeline_selection_reaches_engine_and_is_reset(tmp_path,monkeypatch,met
         seen.append((current_method(),syllables))
         lines[0].words=[Unit(lines[0].text,lines[0].text,start=.1,end=.4)]
         lines[0].start,lines[0].end=.1,.4
-    monkeypatch.setattr(alignment,'align_sofa',route)
+    monkeypatch.setattr(alignment,'align_tifa',route)
     original = current_method()
     result = pipeline.run(tmp_path/'a.wav','hello world',tmp_path,english_splitter=method)
     assert result['status']=='complete' and seen==[(method,True)]

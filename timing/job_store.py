@@ -50,7 +50,7 @@ def load_job(folder):
         try:
             job = json.loads(path.read_text(encoding='utf-8'))
             if not isinstance(job, dict) or job.get('id') != folder.name or job.get('state') not in {
-                    'uploading', 'queued', 'running', 'complete', 'draft', 'failed'}:
+                    'uploading', 'queued', 'running', 'complete', 'draft', 'failed', 'cancelled'}:
                 continue
             revision = job.get('_state_revision', 0)
             if type(revision) is not int:

@@ -16,9 +16,10 @@ from timing.ttml import TT, TTM, XML
 from timing.ttml_input import normalize_ttml, parse_time
 
 
-def document(content, *, language='en', body='', root=''):
-    return (f'<tt xmlns="{TT}" xmlns:ttm="{TTM}" xml:lang="{language}" {root}>'
-            f'<body {body}><div>{content}</div></body></tt>')
+def document(content, *, language='en', body='', root='', div=''):
+    language = '' if language is None else f' xml:lang="{language}"'
+    return (f'<tt xmlns="{TT}" xmlns:ttm="{TTM}"{language} {root}>'
+            f'<body {body}><div {div}>{content}</div></body></tt>')
 
 
 def line(text='Hello &amp; you', begin='00:01.250', end='00:04.500', extra=''):
@@ -79,9 +80,9 @@ def test_inline_annotations_backgrounds_and_duet_are_not_merged_into_main_text()
     main, bg, duet = parse_lyrics(lyrics, 10)
     assert main.text == '君と me'
     assert main.translation == '你和我' and main.roman == 'kimi to me'
-    assert main.language == 'ja'
+    assert main.language == 'auto'
     assert (bg.text, bg.start, bg.end, bg.role, bg.parent, bg.agent) == ('ah', 2, 4, 'bg', 0, 'v2')
-    assert bg.translation == '啊' and bg.language == 'en'
+    assert bg.translation == '啊' and bg.language == 'auto'
     assert duet.agent == 'v2' and duet.role == 'main'
     assert plan_request(lyrics).has_background
 
@@ -89,6 +90,42 @@ def test_inline_annotations_backgrounds_and_duet_are_not_merged_into_main_text()
 def test_background_without_own_clocks_inherits_whole_sentence_range():
     main, bg = parse_lyrics(document(line('hello<span ttm:role="x-bg">ah</span>')), 10)
     assert (bg.start, bg.end) == (main.start, main.end)
+
+
+def test_background_infers_range_from_nested_singing_spans_and_ignores_annotations():
+    lyrics = document(line('hello<span ttm:role="x-bg">('
+                           '<span><span begin="4s" end="4.5s">yeah </span>'
+                           '<span begin="4.6s" dur="1s">baby</span></span>)'
+                           '<span ttm:role="x-translation" begin="1s" end="9s">翻译</span>'
+                           '</span>'))
+    main, bg = parse_lyrics(lyrics, 10)
+    assert (main.start, main.end) == (1.25, 4.5)
+    assert (bg.text, bg.start, bg.end, bg.translation) == ('(yeah baby)', 4, 5.6, '翻译')
+    assert bg.words == []
+    normalized = normalize_ttml(lyrics)
+    converted = parse_lyrics(normalized['lyrics'], 10)
+    assert (converted[1].start, converted[1].end) == (4, 5.6)
+
+
+@pytest.mark.parametrize(('attrs', 'text', 'expected'), [
+    ('begin="2s" end="8s"', '<span begin="3s" end="4s">ah</span>', (2, 8)),
+    ('begin="2s"', '<span begin="3s" end="6s">ah</span>', (2, 6)),
+    ('end="8s"', '<span begin="3s" end="4s">ah</span>', (3, 8)),
+    ('', 'oh <span begin="3s" end="4s">yeah</span>', (1.25, 4.5)),
+    ('', '<span begin="3s">ah</span>', (3, 4.5)),
+    ('', '<span end="3s">ah</span>', (1.25, 3)),
+    ('begin="2s" dur="5s"', '<span begin="3s" end="4s">ah</span>', (2, 7)),
+])
+def test_background_explicit_and_inherited_boundaries(attrs, text, expected):
+    lyrics = document(line(f'hello<span ttm:role="x-bg" {attrs}>{text}</span>'))
+    bg = parse_lyrics(lyrics, 10)[1]
+    assert (bg.start, bg.end) == expected
+
+
+def test_invalid_timed_background_text_is_rejected():
+    lyrics = document(line('hello<span ttm:role="x-bg"><span begin="5s" end="4s">ah</span></span>'))
+    with pytest.raises(ValueError, match='伴唱'):
+        parse_lyrics(lyrics, 10)
 
 
 def test_arbitrary_agent_ids_map_consistently_and_do_not_collapse_third_voice():
@@ -116,25 +153,71 @@ def test_apple_v3_and_group_voice_identifiers_survive_json_and_export():
     assert [row.get(f'{{{TTM}}}agent') for row in root.findall(f'.//{{{TT}}}p')] == ['v1', 'v2', 'v3', 'v1000']
 
 
-def test_apple_head_translation_and_transliteration_follow_keys_and_prefer_chinese():
+def test_apple_sidecars_use_first_track_not_language_labels():
     itunes = 'http://music.apple.com/lyric-ttml-internal'
     head = '''<head><metadata><iTunesMetadata xmlns="http://music.apple.com/lyric-ttml-internal">
       <translations>
-        <translation xml:lang="fr"><text for="L1">bonjour</text></translation>
-        <translation type="subtitle" xml:lang="zh-Hans"><text for="L2">再见</text><text for="L1">你好</text></translation>
+        <translation xml:lang="en"><text for="L2">第二</text><text for="L1">第一</text></translation>
+        <translation type="subtitle" xml:lang="zh-Hans"><text for="L1">错误一</text><text for="L2">错误二</text></translation>
       </translations>
-      <transliterations><transliteration xml:lang="ja-Latn"><text for="L1">konnichiwa</text></transliteration></transliterations>
+      <transliterations>
+        <transliteration xml:lang="fr"><text for="L2">ni</text><text for="L1">ichi</text></transliteration>
+        <transliteration xml:lang="ja-Latn"><text for="L1">wrong-romaji</text></transliteration>
+      </transliterations>
     </iTunesMetadata></metadata></head>'''
     lyrics = document(line('hello', '1s', '3s', 'xmlns:itunes="' + itunes + '" itunes:key="L1"') +
                       line('bye', '2s', '4s', 'xmlns:itunes="' + itunes + '" itunes:key="L2"'))
     lyrics = lyrics.replace('<body ', head + '<body ', 1)
     rows = parse_lyrics(lyrics, 10)
-    assert [row.translation for row in rows] == ['你好', '再见']
-    assert rows[0].roman == 'konnichiwa' and rows[1].roman == ''
+    assert [row.translation for row in rows] == ['第一', '第二']
+    assert [row.roman for row in rows] == ['ichi', 'ni']
     with pytest.raises(ValueError, match='行 ID'):
         parse_lyrics(lyrics.replace('for="L2"', 'for="missing"'), 10)
     with pytest.raises(ValueError, match='重复'):
         parse_lyrics(lyrics.replace('itunes:key="L2"', 'itunes:key="L1"'), 10)
+
+
+@pytest.mark.parametrize(('location', 'language'), [
+    ('root', 'zh-Hans'), ('body', 'en'), ('div', 'ja'),
+    ('paragraph', 'fr'), ('span', 'not_a_language'), ('background', ''),
+])
+def test_xml_lang_never_sets_main_or_background_language(location, language):
+    metadata = f'xml:lang="{language}"'
+    span = f' {metadata}' if location == 'span' else ''
+    background = f' {metadata}' if location == 'background' else ''
+    lyrics = document(
+        line(f'<span{span}>hello</span>'
+             f'<span ttm:role="x-bg" begin="2s" end="3s" ttm:agent="v2"{background}>ah</span>',
+             extra=metadata if location == 'paragraph' else ''),
+        language=language if location == 'root' else None,
+        body=metadata if location == 'body' else '',
+        div=metadata if location == 'div' else '')
+    main, bg = parse_lyrics(lyrics, 10)
+    assert (main.language, bg.language) == ('auto', 'auto')
+    assert (main.text, main.start, main.end, main.role, main.agent) == ('hello', 1.25, 4.5, 'main', 'v1')
+    assert (bg.text, bg.start, bg.end, bg.role, bg.parent, bg.agent) == ('ah', 2, 3, 'bg', 0, 'v2')
+
+
+def test_language_metadata_does_not_change_normalized_lyrics_or_manifest():
+    plain = ('<span>hello</span><span xml:space="preserve"> there</span>'
+             '<span ttm:role="x-translation">你好</span>'
+             '<span ttm:role="x-bg" begin="2s" end="3.5s" ttm:agent="v2">'
+             'ah<span ttm:role="x-translation">啊</span></span>')
+    annotated = (plain
+                 .replace('<span>hello</span>', '<span xml:lang="ko">hello</span>')
+                 .replace('<span xml:space="preserve">', '<span xml:space="preserve" xml:lang="invalid">')
+                 .replace('ttm:role="x-bg"', 'ttm:role="x-bg" xml:lang="ja"'))
+    baseline = document(line(plain, extra='ttm:agent="v1"'), language=None)
+    lyrics = document(line(annotated, extra='ttm:agent="v1" xml:lang="en"'),
+                      language='zh-Hans', body='xml:lang="fr"', div='xml:lang="not_a_language"')
+    raw_rows = parse_lyrics(lyrics, 10)
+    assert [asdict(row) for row in raw_rows] == [asdict(row) for row in parse_lyrics(baseline, 10)]
+    assert [row.language for row in raw_rows] == ['auto', 'auto']
+    normalized = normalize_ttml(lyrics)
+    assert normalized == normalize_ttml(baseline)
+    assert [row['language'] for row in json.loads(normalized['lyrics'])] == ['auto', 'auto']
+    assert [asdict(row) for row in parse_lyrics(normalized['lyrics'], 10)] == [asdict(row) for row in raw_rows]
+    assert manifest(lyrics) == manifest(baseline) == manifest(normalized['lyrics'])
 
 
 @pytest.mark.parametrize('agent', ['v0', 'v-1', 'v1 v2', '', 'v1000000000', None, 3])

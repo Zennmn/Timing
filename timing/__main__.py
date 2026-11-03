@@ -12,7 +12,7 @@ def main():
     parser.add_argument("--lyrics", type=Path, help="必需，UTF-8 TXT/LRC/JSON/逐行 TTML 正确歌词")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--vocals", type=Path, help="可选，同起点同时长的人声轨")
-    parser.add_argument("--language", choices=LANGUAGES, default="mixed", help='zh 普通话；zh-en 中英混唱；mixed 日英混唱')
+    parser.add_argument("--language", choices=LANGUAGES, default="mixed", help='本地路线：zh 普通话；zh-en 中英；mixed 日英。LLM 路线忽略此设置，自行判断语言')
     parser.add_argument("--word-level", action="store_true", help="英语按整词打轴，不拆音节")
     parser.add_argument("--english-splitter", choices=["syllabify", "pyphen", "llm"], default="syllabify", help="英语音节划分；llm 使用 OpenAI-compatible Chat Completions 接口")
     parser.add_argument('--llm-base-url',help='含 /v1 的兼容接口地址；也可用 TIMING_LLM_BASE_URL')
@@ -26,10 +26,9 @@ def main():
     parser.add_argument('--llm-thinking-mode',choices=['default','on','off'],default=None,help='思考模式；默认跟随平台')
     parser.add_argument('--llm-thinking-format',choices=['reasoning_effort','enable_thinking','thinking'],default=None,help='兼容接口的思考参数格式')
     parser.add_argument('--llm-reasoning-effort',default=None,help='思考强度，如 low/medium/high/xhigh 或平台自定义值')
-    parser.add_argument('--llm-audio-reading',action='store_true',help='发送逐句音频给兼容接口校对中文或日语读音；需要 LRC/TIFA')
-    parser.add_argument('--llm-audio-split',action='store_true',help='LLM 英语拆分同时发送实际音频；需要 LRC/TIFA 和 --english-splitter llm')
     parser.add_argument('--audio-mode', choices=AUDIO_MODES, default='lead', help='lead 只保留主唱；vocals 去伴奏并保留和声；source 直接使用原曲或导入轨')
-    parser.add_argument("--aligner", choices=ALIGNERS, default="auto", help="llm_direct 一次发送完整音轨和歌词，自动判断中日英读音与分段，再用 TIFA 计时；需要 LRC 和音频兼容接口")
+    parser.add_argument("--aligner", choices=ALIGNERS, default="auto", help="自动使用 TIFA；MMS 支持纯文本和逐句歌词。llm_text 只发送歌词文字；llm_direct 发送完整音轨；LLM 需逐句范围，使用 TIFA 计算时间")
+    parser.add_argument('--trust-line-timestamps', action='store_true', help='确信逐句 LRC／TTML 时间准确时，跳过 TIFA 前的 MMS 粗定位')
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--port", type=int, default=7861)
     args = parser.parse_args()
@@ -81,7 +80,7 @@ def main():
             import_response(lyrics, llm_result)
         plan = plan_request(lyrics, language=args.language, aligner=args.aligner, audio_mode=args.audio_mode,
                             syllables=not args.word_level, english_splitter=args.english_splitter,
-                            llm_audio_reading=args.llm_audio_reading, llm_audio_split=args.llm_audio_split)
+                            trust_line_timestamps=args.trust_line_timestamps)
         llm_config = None
         if plan.needs_llm:
             import os
@@ -98,9 +97,10 @@ def main():
         extra = {'llm_result':llm_result} if args.aligner == 'llm_import' else {}
         if args.aligner == 'llm_direct':
             extra['llm_prompt_profile'] = args.llm_prompt_profile
+        extra['trust_line_timestamps'] = plan.trust_line_timestamps
         run(args.audio, lyrics, folder, args.language, plan.syllables, args.vocals,
                      audio_mode=plan.audio_mode, aligner=args.aligner, english_splitter=plan.english_splitter,
-                     llm_config=llm_config, llm_audio_reading=plan.llm_audio_reading, llm_audio_split=plan.llm_audio_split,**extra)
+                     llm_config=llm_config, **extra)
         shutil.copyfile(folder / "lyrics.ttml", output)
         print(f"TTML: {output.resolve()}")
         print(f"对齐记录: {(folder / 'alignment.json').resolve()}")

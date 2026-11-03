@@ -64,21 +64,25 @@ def test_singing_receives_full_band_source_not_asr_waveform(tmp_path, monkeypatc
         separations.append(True)
         return stem, {}
 
-    class Singer:
+    class Coarse:
         def __init__(self, log): pass
-        def align(self, audio, lines, syllables, cache_dir, *, sample_rate):
-            assert audio is singing_wave and sample_rate == 44100
-            lines[0].words = [Unit("hello", "hello", start=.1, end=.7)]
-            lines[0].start, lines[0].end = .1, .7
-            return {"frame_ms": 128 / 44100 * 1000}
+        def release(self): pass
+        def align(self, audio, line, *args): line.start, line.end = .1, .7
+
+    def fine(audio, rate, lines, *args, **kwargs):
+        assert audio is singing_wave and rate == 44100
+        lines[0].words = [Unit("hello", "hello", start=.1, end=.7)]
+        lines[0].start, lines[0].end = .1, .7
+        return {"frame_ms": 10}
 
     monkeypatch.setattr(pipeline, "decode", decode)
     monkeypatch.setattr(alignment, "decode", decode)
     monkeypatch.setattr("timing.sources.decode", decode)
-    monkeypatch.setattr(alignment, "SingingAligner", Singer)
+    monkeypatch.setattr(alignment, 'CtcAligner', Coarse)
+    monkeypatch.setattr(alignment.tifa, 'align', fine)
     monkeypatch.setattr("timing.sources.separate_vocals", separate)
     mode = "source" if source == "original" else "vocals"
-    pipeline.run(song, "hello", tmp_path, "en",
+    pipeline.run(song, "[00:00]hello", tmp_path, "en",
                  vocals_path=stem if source == "provided" else None,
                  log=lambda _: None, audio_mode=mode)
     assert reads[-1] == (song if source == "original" else stem, 44100, True)

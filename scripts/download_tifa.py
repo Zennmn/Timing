@@ -8,6 +8,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from download_support import atomic_write_json, error_tail, fetch, file_matches, sha256_file
+from download_unidic import install as install_dictionary
 
 ROOT=Path(__file__).resolve().parent.parent
 FOLDER=ROOT/'models/tifa'
@@ -96,6 +97,7 @@ def main():
         raise RuntimeError('TIFA 运行依赖导入失败：'+error_tail(detail))
     if not _manifest_ok():
         raise RuntimeError('TIFA 文件完整性校验失败，请重新运行 scripts/download_tifa.py。')
+    install_dictionary()
     print('TIFA 本地文件与运行依赖校验通过。',flush=True)
 
 

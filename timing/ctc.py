@@ -21,6 +21,28 @@ def ready():
     return all((CTC_DIR / name).is_file() for name in ["config.json", "model.safetensors", "preprocessor_config.json", "vocab.json", "manifest.json"])
 
 
+def output_frames(samples, kernels, strides):
+    """Native convolution output length; never stretch its grid to crop duration."""
+    length = samples
+    for kernel, stride in zip(kernels, strides):
+        length = (length-kernel)//stride+1
+    return max(0, length)
+
+
+def emission_chunks(samples, kernels, strides, core_seconds=20, context_seconds=1):
+    stride, receptive = 1, 1
+    for kernel, step in zip(kernels, strides):
+        receptive += (kernel-1)*stride
+        stride *= step
+    frames = output_frames(samples, kernels, strides)
+    core = max(1, round(core_seconds*16000/stride))
+    context = max(1, round(context_seconds*16000/stride))
+    for first in range(0, frames, core):
+        last = min(frames, first+core)
+        left, right = max(0, first-context), min(frames, last+context)
+        yield first, last, left*stride, min(samples, (right-1)*stride+receptive), first-left
+
+
 @njit(cache=True)
 def viterbi(log_probs, targets, blank=0):
     """Standard CTC state graph; every target is acoustically visited in order."""
@@ -58,7 +80,7 @@ def viterbi(log_probs, targets, blank=0):
     return path, score
 
 
-def text_units(text, syllables=True, *, japanese_readings=None, language='mixed'):
+def text_units(text, syllables=True, *, language='mixed'):
     units, labels = [], []
     overrides = pronunciation_overrides()
     from .chinese import is_chinese, chinese_units, mandarin_parts, roman_label, phrase_readings
@@ -71,12 +93,9 @@ def text_units(text, syllables=True, *, japanese_readings=None, language='mixed'
                 units.extend(english); labels.extend(roman)
             else:
                 manual = overrides.get('zh', {}).get(word.spoken) or phrases.get(index)
-                audio_reading = (japanese_readings or {}).get(word.spoken) if not manual else None
-                parts = mandarin_parts(word, {word.spoken:manual or audio_reading} if manual or audio_reading else None, require_phones=False)
+                parts = mandarin_parts(word, {word.spoken:manual} if manual else None, require_phones=False)
                 for display, reading, phones, flags in parts:
                     flags = list(flags)
-                    if audio_reading:
-                        flags = [flag for flag in flags if flag != 'custom_pronunciation'] + ['llm_audio_reading_candidate']
                     units.append(Unit(display, kept(display), reading, flags=flags+['ctc_acoustic_alignment'], source_pronunciation=reading))
                     labels.append(roman_label(reading))
         if ''.join(unit.text for unit in units) != text:
@@ -94,13 +113,10 @@ def text_units(text, syllables=True, *, japanese_readings=None, language='mixed'
                 labels.append(unit.spoken.lower().replace("’", "'"))
         else:
             manual = overrides['ja'].get(word.spoken)
-            audio_reading = (japanese_readings or {}).get(word.spoken) if not manual else None
-            parts, pronunciation = japanese_acoustic_parts(word, True, manual or audio_reading)
+            parts, pronunciation = japanese_acoustic_parts(word, True, manual)
             flat = [phone for _, _, phones, _ in parts for phone in phones]
             position = 0
             for display, reading, phones, flags in parts:
-                if audio_reading:
-                    flags = [f for f in flags if f!='custom_pronunciation']+['llm_audio_reading_candidate']
                 roman = ""
                 for phone in phones:
                     if phone == "cl":
@@ -144,19 +160,46 @@ class CtcAligner:
         gc.collect()
         torch.cuda.empty_cache()
 
+    def emissions(self, samples, *, sample_rate=16000):
+        """Bounded GPU analysis, one continuous CPU emission grid for a full song."""
+        import torch
+        from scipy.signal import resample_poly
+        self.load()
+        factor = math.gcd(sample_rate, 16000)
+        wave = np.asarray(samples, dtype=np.float32)
+        if sample_rate != 16000:
+            wave = resample_poly(wave, 16000//factor, sample_rate//factor).astype('float32')
+        if wave.ndim != 1 or not np.isfinite(wave).all() or len(wave) < 400:
+            raise ValueError('整曲定位需要有效的单声道音频（至少25毫秒）。')
+        kernels, strides = self.model.config.conv_kernel, self.model.config.conv_stride
+        frames = output_frames(len(wave), kernels, strides)
+        chunks = list(emission_chunks(len(wave), kernels, strides))
+        result = np.empty((frames, len(self.vocab)), dtype=np.float32)
+        for index, (first, last, start, end, crop) in enumerate(chunks):
+            self.log(f'MMS 整曲定位：分析音频 {index+1}/{len(chunks)}…')
+            inputs = self.extractor(wave[start:end], sampling_rate=16000, return_tensors='pt').to('cuda')
+            with torch.inference_mode():
+                logits = self.model(**inputs).logits[0].float()
+                selected = logits[crop:crop+last-first].log_softmax(-1).cpu().numpy()
+            if selected.shape != result[first:last].shape:
+                raise ValueError('MMS 分块输出帧数不一致，未拉伸时间。')
+            result[first:last] = selected
+            del logits, inputs
+        return result, {'engine': 'MMS-300M global transcript localization',
+                        'frame_ms': int(np.prod(strides))/16000*1000,
+                        'chunks': len(chunks), 'core_seconds': 20, 'context_seconds': 1,
+                        'frames': frames, 'duration': len(wave)/16000,
+                        'revision': '49402e9577b1158620820667c218cd494cc44486'}
+
     def align(self, samples, line, syllables=True, *, sample_rate=16000, prepared=None):
         import torch
         from scipy.signal import resample_poly
         self.load()
-        from .audio_readings import primary_readings
-        readings = primary_readings(line)
         if prepared is not None:
             units, labels = prepared
         else:
-            options = {'japanese_readings':readings} if readings else {}
-            if line.language in ('zh', 'zh-en'):
-                options['language'] = line.language
-            units, labels = text_units(line.text, syllables, **options)
+            language = line.language if line.language in ('zh', 'zh-en') else 'mixed'
+            units, labels = text_units(line.text, syllables, language=language)
         if len(units)!=len(labels) or ''.join(unit.text for unit in units)!=line.text or any(not label for label in labels):
             raise ValueError('CTC 显式分段未完整覆盖原歌词。')
         if not units:

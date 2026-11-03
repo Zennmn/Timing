@@ -271,8 +271,9 @@ def test_models_retry_each_group_and_never_mark_a_failure_complete(tmp_path, mon
     assert status["complete"] is False
     assert status["groups"]["tifa"]["status"] == "failed"
     assert status["groups"]["tifa"]["attempts"] == 3
+    assert list(status["groups"]) == ["ctc", "tifa", "bs_lead", "separator"]
     assert all(status["groups"][name]["status"] == "complete"
-               for name in ("ctc", "singing", "bs_lead", "separator"))
+               for name in ("ctc", "bs_lead", "separator"))
     assert "第 3/3 次" in (tmp_path / "logs" / "tifa.log").read_text(encoding="utf-8")
 
 

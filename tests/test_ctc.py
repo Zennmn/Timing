@@ -59,7 +59,7 @@ def test_explicit_ctc_keeps_absolute_windows_and_releases(tmp_path, monkeypatch,
     class Ctc:
         def __init__(self, log): pass
         def release(self): releases.append(True)
-        def align(self, audio, line, *args):
+        def align(self, audio, line, *args, **kwargs):
             calls.append(len(audio)/16000)
             line.words=[Unit(line.text,line.text,start=.1,end=5 if outside else .4)]
             return {"engine":"CTC test", "frame_ms":20}
@@ -79,7 +79,7 @@ def test_explicit_ctc_keeps_absolute_windows_and_releases(tmp_path, monkeypatch,
     assert releases==[True]
 
 
-@pytest.mark.parametrize("aligner,expected", [('ctc',200),('sofa',200),('unknown',400)])
+@pytest.mark.parametrize("aligner,expected", [('ctc',200),('tifa',200),('sofa',400),('unknown',400)])
 def test_api_backend_selection_reaches_job_or_rejects_unknown(tmp_path,monkeypatch,aligner,expected):
     from timing import server
     from fastapi.testclient import TestClient

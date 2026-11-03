@@ -55,6 +55,7 @@ def test_song_over_45_seconds_and_eight_lines_is_sent_once_including_intro_and_o
         assert len(audio)==150*rate and audio[0]==.25 and audio[-1]==-.25
         assert payload['audio_range']==[0,150]
         assert len(payload['items'])==20
+        assert 'language_mode' not in payload and 'language' not in payload
         assert all('language' not in row for row in payload['items'])
         assert payload['items'][0]['start']==10 and payload['items'][-1]['start']==124
         assert request.extensions['timeout']['read']==600
@@ -165,14 +166,15 @@ def test_full_audio_resampling_preserves_duration_and_signal_edges():
     assert np.allclose(wave[100:-100],.25,atol=1e-3)
 
 
-def test_direct_request_plan_ignores_both_song_and_json_language_hints():
+@pytest.mark.parametrize('aligner', ['llm_text', 'llm_direct', 'llm_import'])
+def test_llm_request_plan_ignores_both_song_and_json_language_hints(aligner):
     rows=[{'text':'你好','start':0,'end':1,'language':'ja'},
           {'text':'今日','start':1,'end':2,'language':'zh'}]
     for language in ('zh','ja','en','mixed','zh-en','auto'):
-        plan=plan_request(json.dumps(rows),aligner='llm_direct',language=language,
-                          english_splitter='llm',llm_audio_reading=True,llm_audio_split=True)
+        plan=plan_request(json.dumps(rows),aligner=aligner,language=language,
+                          english_splitter='llm')
         assert [line.language for line in plan.lines]==['auto','auto']
-        assert plan.needs_llm and not plan.syllables and not plan.llm_audio_reading and not plan.llm_audio_split
+        assert plan.needs_llm == (aligner != 'llm_import') and not plan.syllables
 
 
 def test_long_local_window_preserves_lrc_instead_of_sending_overlong_tifa_clip(tmp_path, inventory, monkeypatch):

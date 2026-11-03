@@ -32,6 +32,22 @@ def restore_display(original, labels):
         chars = canonical_apostrophes(kept(ch)).casefold()
         normalized += chars
         positions.extend([i]*len(chars))
+    whole = canonical_apostrophes(kept(original)).casefold()
+    if normalized != whole:
+        # NFKC can compose multiple source characters into one display glyph.
+        # Track the source start of the rewritten suffix, retaining the entire
+        # original grapheme when native PFML returns its composed spelling.
+        normalized, positions = '', []
+        for i in range(len(original)):
+            current = canonical_apostrophes(kept(original[:i+1])).casefold()
+            shared = 0
+            for left, right in zip(normalized, current):
+                if left != right:
+                    break
+                shared += 1
+            owner = positions[shared] if shared < len(positions) else i
+            positions = positions[:shared] + [owner]*(len(current)-shared)
+            normalized = current
     expected = "".join(canonical_apostrophes(kept(label)).casefold() for label in labels)
     if normalized != expected or not expected:
         raise ValueError("TIFA 原文映射不完整，未跳字或替换歌词。")
@@ -42,6 +58,8 @@ def restore_display(original, labels):
             raise ValueError("TIFA 空文字映射。")
         starts.append(positions[cursor])
         cursor += size
+    if any(b <= a for a,b in zip(starts, starts[1:])):
+        raise ValueError('TIFA 文字分段不可切开同一个组合字符。')
     starts[0] = 0
     return [original[a:b] for a,b in zip(starts, starts[1:]+[len(original)])]
 
@@ -123,8 +141,6 @@ def map_result(line, row, offset, syllables=True, *, partial=False):
             local_flags = list(flags)+["tifa_native_alignment"]
             if candidate.get("custom_pronunciation"):
                 local_flags.append("custom_pronunciation")
-            if candidate.get('llm_audio_reading_candidate'):
-                local_flags.append('llm_audio_reading_candidate')
             if candidate.get('llm_direct_candidate') and 'llm_direct_candidate' not in local_flags:
                 local_flags.append('llm_direct_candidate')
             if any(c.isdecimal() for c in kept(part)):
@@ -173,7 +189,9 @@ def run_worker(folder, clips, log=print, pronunciations=None):
     request = folder / "request.json"
     active = set()
     for clip in clips:
-        active.update(part['lang'] for part in clip.get('llm_direct_parts', []))
+        if 'llm_direct_parts' in clip:
+            from .llm_direct import acoustic_languages
+            active.update(acoustic_languages(clip['llm_direct_parts']))
         active.update(clip.get('languages', []))
     payload = {"clips": clips}
     if active:
@@ -195,11 +213,7 @@ def run_worker(folder, clips, log=print, pronunciations=None):
 
 
 def map_clip(line, row, clip, syllables, *, partial=False):
-    from .llm_splitter import current_session
-    from contextlib import nullcontext
-    session=current_session()
-    with session.audio_line(line) if session is not None else nullcontext():
-        return _map_clip(line,row,clip,syllables,partial=partial)
+    return _map_clip(line,row,clip,syllables,partial=partial)
 
 
 def _map_clip(line, row, clip, syllables, *, partial=False):
@@ -228,9 +242,6 @@ def validate_clip(probe,line,clip):
 
 
 def prepare_clips_llm(lines,clips,rows):
-    from .llm_splitter import current_session
-    if current_session() is not None and current_session().audio_enabled:
-        return
     """Prefetch all valid target pronunciations, including a batch of retries."""
     if current_method() != 'llm':
         return
@@ -301,16 +312,11 @@ def complete_results(samples, rate, lines, folder, clips, raw, log=print, *, syl
                                 "target_end": len(kept(line.text).casefold())})
                 retries[-1]['languages'] = ['zh','en'] if line.language in ('zh','zh-en') else ['ja','en']
                 if 'llm_direct_parts' in clips[i]:
-                    from .llm_direct import target_parts, write_pfml
+                    from .llm_direct import target_parts, write_pfml, acoustic_languages
                     parts=target_parts(clips[i]['llm_direct_parts'],clips[i]['target_start'],clips[i]['target_end'])
                     retries[-1]['llm_direct_parts']=parts
-                    retries[-1]['languages']=[lang for lang in ('ja','zh','en') if any(part['lang']==lang for part in parts)]
+                    retries[-1]['languages']=acoustic_languages(parts)
                     write_pfml(audio,parts)
-                from .audio_readings import clip_candidates
-                readings=clip_candidates([line], 'zh' if line.language in ('zh','zh-en') else 'ja')
-                if readings:
-                    key = 'chinese_audio_candidates' if line.language in ('zh','zh-en') else 'japanese_audio_candidates'
-                    retries[-1][key]=readings
         if retries:
             try:
                 retry_raw = run_worker(retry_folder, retries, log, pronunciations=pronunciations)
@@ -365,14 +371,17 @@ def complete_results(samples, rate, lines, folder, clips, raw, log=print, *, syl
     for i, line in enumerate(lines):
         if i not in selected:
             anchor = anchors[i]
+            automatic = 'text_coarse_localization_check' in anchor.flags
+            flag = 'text_coarse_review_placeholder' if automatic else 'lrc_review_placeholder'
             line.start, line.end = round(anchor.start, 3), round(anchor.end, 3)
-            line.flags.append("lrc_review_placeholder")
+            line.flags.append(flag)
             line.words = [Unit(line.text, kept(line.text), start=line.start, end=line.end,
-                               flags=["lrc_review_placeholder"])]
-            log(f"第 {i+1} 行「{line.text}」需人工补逐字轴：保留整句 LRC 时间后继续导出。")
-            checks.append({"line": i+1, "mode": "lrc_review_placeholder", "reason": failures[i],
+                               flags=[flag])]
+            source = '模型粗定位范围' if automatic else '整句 LRC 时间'
+            log(f"第 {i+1} 行「{line.text}」需人工补逐字轴：保留{source}后继续导出。")
+            checks.append({"line": i+1, "mode": flag, "reason": failures[i],
                            "range_start": line.start, "range_end": line.end,
-                           "note": "仅为输入逐句时间占位，未获得模型逐字边界。"})
+                           "note": "仅为模型粗定位范围，未获得 TIFA 逐字边界。" if automatic else "仅为输入逐句时间占位，未获得模型逐字边界。"})
             continue
         probe, row, clip, mode = selected[i]
         line.start, line.end, line.words, line.flags = probe.start, probe.end, probe.words, probe.flags
@@ -390,7 +399,7 @@ def complete_results(samples, rate, lines, folder, clips, raw, log=print, *, syl
 
 
 def align(samples, rate, lines, output_dir, coarse_rows, log=print, *, syllables=True, background=None,
-          pronunciations=None):
+          pronunciations=None, trust_line_timestamps=False):
     if not ready():
         raise RuntimeError("TIFA 未配置完整，请运行 scripts/download_tifa.py。")
     manifest = json.loads((FOLDER/"manifest.json").read_text(encoding="utf-8"))
@@ -418,7 +427,10 @@ def align(samples, rate, lines, output_dir, coarse_rows, log=print, *, syllables
         # LRC marks a next-line onset, not a verified previous-vowel offset.
         # Retain a little crossfade/reverb context rather than truncating at it.
         context_limit = min(len(wave)/rate, lines[last].end+.35)
-        right, gate = quiet_crop_end(wave,rate,coarse_rows[last]["end"],context_limit,coarse_rows[last]["start"])
+        if trust_line_timestamps:
+            right, gate = context_limit, None
+        else:
+            right, gate = quiet_crop_end(wave,rate,coarse_rows[last]["end"],context_limit,coarse_rows[last]["start"])
         if not .1 <= right-left <= 60:
             raise ValueError("TIFA 单句范围需在0.1到60秒之间。")
         a,b=round(left*rate),round(right*rate)
@@ -435,11 +447,6 @@ def align(samples, rate, lines, output_dir, coarse_rows, log=print, *, syllables
         clips.append({"id":name,"audio":str(audio.resolve()),"start":a/rate,"end":b/rate,"gate":gate,
                       "context_lines":[i+1 for i in neighbours],"target_start":target_start,"target_end":target_end})
         clips[-1]['languages'] = ['zh','en'] if line.language in ('zh','zh-en') else ['ja','en']
-        from .audio_readings import clip_candidates
-        readings=clip_candidates([lines[i] for i in neighbours], 'zh' if line.language in ('zh','zh-en') else 'ja')
-        if readings:
-            key = 'chinese_audio_candidates' if line.language in ('zh','zh-en') else 'japanese_audio_candidates'
-            clips[-1][key]=readings
     log("TIFA：选择匹配歌声的读音并对齐字词…")
     raw=run_worker(folder,clips,log,pronunciations=pronunciations)
     checks=complete_results(samples,rate,lines,folder,clips,raw,log,syllables=syllables,background=background,

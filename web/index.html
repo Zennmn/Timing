@@ -4,7 +4,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="timing-token" content="__TIMING_TOKEN__">
 <title>Timing · 歌词打轴</title>
-<link rel="stylesheet" href="/static/styles.css?v=0.13.0">
+<link rel="stylesheet" href="/static/styles.css?v=0.22.0">
 </head>
 <body>
 <main>
@@ -22,17 +22,19 @@
 <p id="audio-route" class="hidden" aria-hidden="true"></p><p id="bg-note" class="hint hidden"></p><p id="audio-error" class="error-note hidden" role="alert"></p>
 </div></section>
 <section class="section" aria-labelledby="lyrics-heading">
-<div class="section-title"><h2 id="lyrics-heading"><label for="lyrics">歌词</label></h2><p>粘贴或导入歌词；TTML 会先在本机转换为逐句歌词，提交以文本框里的内容为准。</p><div id="language-settings" class="language-settings"><label for="language">歌曲语言</label><select id="language" name="language" aria-describedby="language-hint"><option value="mixed">日英混唱</option><option value="ja">日语</option><option value="en">英语</option><option value="zh">中文（普通话）</option><option value="zh-en">中英混唱</option></select><p id="language-hint" class="hint">选择整首歌实际使用的语言；默认日英混唱覆盖日语与英语。汉字不会自动判定为中文：中文歌曲请选“中文（普通话）”，中英混唱请选“中英混唱”；JSON 行上的 language 优先于此选项。</p></div></div>
+<div class="section-title"><h2 id="lyrics-heading"><label for="lyrics">歌词</label></h2><p>粘贴或导入歌词，支持 TXT、LRC、JSON、TTML。</p><div id="language-settings" class="language-settings"><label for="language">歌曲语言</label><select id="language" name="language" aria-describedby="language-hint"><option value="mixed">自动识别（日／英）</option><option value="ja">日语</option><option value="en">英语</option><option value="zh">中文（普通话）</option><option value="zh-en">中英混唱</option></select><p id="language-hint" class="hint">中文歌曲或中英混唱，请手动选择。</p></div></div>
 <div class="section-content">
-<div class="lyrics-box"><pre id="line-numbers" class="line-numbers" aria-hidden="true">1</pre><textarea id="lyrics" name="lyrics" aria-describedby="lyrics-status" spellcheck="false" placeholder="每行一句，重复的副歌也请完整填写。&#10;TXT 是纯歌词；LRC 是每句带时间的歌词；TTML 会自动转换为逐句 JSON。&#10;歌词为必填项。"></textarea><button id="import-lyrics" class="lyrics-import" type="button">导入歌词</button></div>
+<div class="lyrics-box"><pre id="line-numbers" class="line-numbers" aria-hidden="true">1</pre><textarea id="lyrics" name="lyrics" aria-describedby="lyrics-status" spellcheck="false" placeholder="每行一句，重复的副歌也请完整填写。&#10;有时间标签的歌词可以直接粘贴。"></textarea><button id="import-lyrics" class="lyrics-import" type="button">导入歌词</button></div>
 <input class="sr-only" id="lyrics_file" type="file" accept=".txt,.lrc,.json,.ttml" aria-label="导入 TXT、LRC、JSON 或 TTML 歌词文件">
+<p id="lrc-help" class="hint">LRC 支持 <code>[00:17.250]歌词</code>，由下一句开始时间推断结尾；也可写成 <code>[00:17.250]歌词[00:21.120]</code> 明确每行结尾，允许句间留白或与下一句重叠。</p>
 <div class="lyrics-status-row"><div class="lyrics-status" role="status"><img id="lyrics-status-icon" class="status-icon hidden" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiM0ZTU5NjciIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMjIgMTEuMDhWMTJhMTAgMTAgMCAxIDEtNS45My05LjE0Ii8+PHBvbHlsaW5lIHBvaW50cz0iMjIgNCAxMiAxNC4wMSA5IDExLjAxIi8+PC9zdmc+" alt=""><span id="lyrics-status">未填写歌词：请粘贴或导入歌词。</span></div><button id="clear-lyrics" class="text-button hidden" type="button">清空歌词</button></div><p id="lyrics-file-note" class="sr-only"></p>
 
 </div></section>
 <section id="alignment-section" class="section" aria-labelledby="alignment-heading">
-<div class="section-title"><h2 id="alignment-heading"><label for="aligner">处理方式</label></h2><p id="mode-description">根据歌词是否带逐句时间选择处理方式。</p></div>
+<div class="section-title"><h2 id="alignment-heading"><label for="aligner">处理方式</label></h2><p id="mode-description">自动、TIFA 与 MMS 支持纯文本；LLM 方案需要逐句时间。</p></div>
 <div class="section-content">
-<select id="aligner" name="aligner" aria-describedby="mode-hint"><option value="auto">自动选择对齐方案</option><option value="llm_direct">LLM 整曲识别（自动识别语言与读音，需逐句时间）</option><option value="llm_import">网页 LLM（导入结果）</option><option value="tifa">TIFA · 中日英歌声对齐（需逐句时间）</option><option value="ctc">MMS · 多语逐句对齐（需逐句时间）</option><option value="sofa">SOFA · 歌声对齐（对比用）</option></select>
+<select id="aligner" name="aligner" aria-describedby="mode-hint"><option value="auto">自动选择对齐方案</option><option value="llm_text">LLM 文本读音（不听音，需逐句时间）</option><option value="llm_direct">LLM 整曲识别（自动识别语言与读音，需逐句时间）</option><option value="llm_import">网页 LLM（导入结果，需逐句时间）</option><option value="tifa">TIFA · 中日英歌声对齐</option><option value="ctc">MMS · 本地 CTC 对齐（支持纯文本）</option></select>
+<div id="trust-timestamps-settings" class="local-settings"><label class="check" for="trust-line-timestamps"><input id="trust-line-timestamps" type="checkbox" aria-describedby="trust-timestamps-hint">信任逐句时间轴，跳过 MMS 粗定位</label><p id="trust-timestamps-hint" class="hint">仅在你确认 LRC 逐句范围可靠（可只提供开始时间）或 TTML 已转换为带起止时间的逐句歌词时使用；纯文本和 MMS 单独对齐不可用。</p></div>
 <p id="mode-hint" class="mode-hint"></p>
 <div id="prompt-profile-settings" class="local-settings hidden"><label for="llm-prompt-profile">日语拆分</label><select id="llm-prompt-profile" name="llm_prompt_profile" aria-describedby="prompt-profile-hint"><option value="fine">细拆（默认）</option><option value="original">适度合并（旧版）</option></select><p id="prompt-profile-hint" class="hint">仅影响之后生成的提示词；切换后请重新生成。已粘贴的网页 LLM 结果会保留，实际导入的分词仍以结果为准。</p></div>
 <div id="llm-import-panel" class="helper hidden">
@@ -52,7 +54,6 @@
 <p id="llm-result-status" class="hint" role="status">结果会随提交上传；你可以先检查绑定和完整度。</p>
 </div>
 <div id="english-settings" class="local-settings hidden"><label class="check"><input id="syllables" type="checkbox" checked>把英文单词按发音拆成音节</label><div id="splitter-settings"><label class="sr-only" for="english-splitter">英语音节划分方案</label><select id="english-splitter"><option value="syllabify">syllabify · 按发音拆分英文单词</option><option value="pyphen">pyphen · 按拼写规则拆分（对比用）</option><option value="llm">llm · 用接口辅助拆分</option></select></div><p id="splitter-hint" class="hint"></p></div>
-<div id="audio-helpers" class="helper hidden"><label id="audio-reading-field" class="check hidden"><input id="llm-audio-reading" type="checkbox"><span id="audio-reading-text">LLM 听音校对日语读音</span></label><label id="audio-split-field" class="check hidden"><input id="llm-audio-split" type="checkbox">英语拆分同时听音频</label><p class="hint">听音辅助需要支持音频的接口；每段最长 30 秒；中文读音结果以拼音给出。</p></div>
 <fieldset id="llm-settings" class="api-settings hidden" disabled><legend>API 配置</legend>
 <div class="api-grid"><div class="inline-field"><label for="llm-base-url">Base URL</label><input id="llm-base-url" name="llm_base_url" type="url" placeholder="https://your-provider.example/v1" autocomplete="off"></div><div class="inline-field"><label for="llm-model">模型</label><input id="llm-model" name="llm_model" type="text" placeholder="接口的模型 ID" autocomplete="off"></div></div>
 <div class="key-row"><label for="llm-api-key">API Key</label><div class="key-control"><input id="llm-api-key" name="llm_api_key" type="password" placeholder="免密的本地接口可留空" autocomplete="off" spellcheck="false" aria-describedby="key-hint"><button id="toggle-key" type="button" aria-label="显示 API Key" aria-pressed="false"><img id="key-eye" class="icon" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiM0ZTU5NjciIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMSAxMnM0LTggMTEtOCAxMSA4IDExIDgtNCA4LTExIDgtMTEtOC0xMS04eiIvPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTIiIHI9IjMiLz48L3N2Zz4=" alt=""></button></div></div>
@@ -71,9 +72,15 @@
 <div class="submit-bar"><div><strong id="run-summary">选择歌曲和歌词，生成 TTML</strong><p id="run-disclosure">文件只保存在本机；下载后先试听校对。</p></div><button id="submit" class="primary" type="submit" disabled><span id="submit-label">生成 TTML</span><img class="icon" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiM0ZTU5NjciIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48bGluZSB4MT0iNSIgeTE9IjEyIiB4Mj0iMTkiIHkyPSIxMiIvPjxwb2x5bGluZSBwb2ludHM9IjEyIDUgMTkgMTIgMTIgMTkiLz48L3N2Zz4=" alt=""></button></div>
 <div class="service-line"><p id="model-status" role="status">正在检查本地服务…</p><button id="retry-models" class="text-button hidden" type="button">重新检查</button></div>
 </form>
+<section id="queue-section" class="queue-section" aria-labelledby="queue-heading">
+<div class="queue-heading"><div><h2 id="queue-heading">任务队列</h2><p>可以连续添加歌曲；当前歌曲处理时也可以继续提交下一首。</p></div><p id="queue-summary" class="queue-summary" role="status">正在读取任务…</p></div>
+<p id="queue-message" class="queue-message" role="status" aria-live="polite"></p>
+<div id="queue-empty" class="queue-empty hidden">暂无任务。选择音频和歌词后加入队列。</div>
+<div id="queue-list" class="queue-list"></div>
+</section>
 <section id="progress" class="progress hidden" tabindex="-1" aria-labelledby="state"><div class="progress-top"><strong id="state" role="status" aria-live="polite">准备中…</strong><span id="job-info"></span></div><p id="result-message"></p><div id="links" class="links"></div><details id="log-details"><summary>处理日志</summary><pre id="log" aria-live="off"></pre></details><p id="error" class="warning" role="alert"></p></section>
 <footer>Timing · 本机计算与保存 · TTML 可直接导入 AMLL；下载后先试听校对，少数字需手工补时间。</footer>
 </main>
-<script src="/static/ui-logic.js?v=0.13.0"></script>
-<script src="/static/app.js?v=0.13.0"></script>
+<script src="/static/ui-logic.js?v=0.22.0"></script>
+<script src="/static/app.js?v=0.22.0-trust-timestamps-1"></script>
 </body></html>

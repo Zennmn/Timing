@@ -47,7 +47,7 @@ def test_unsupported_sung_text_is_not_ignored_or_read_as_japanese():
         chinese_units('你好の世界')
 
 
-@pytest.mark.parametrize('aligner', ['auto','tifa','ctc','sofa','llm_direct'])
+@pytest.mark.parametrize('aligner', ['auto','tifa','ctc','llm_direct'])
 def test_every_aligner_accepts_chinese_and_mixed_anchored_lyrics(aligner):
     for language in ('zh','zh-en'):
         plan = plan_request('[00:01]你好 Hello', language=language, aligner=aligner)
@@ -96,30 +96,11 @@ def test_chinese_phrase_overrides_are_consistent_in_mms_and_tifa(monkeypatch):
     assert [word.readings[0].paths[0][0].script for word in words] == ['zhong','qing']
 
 
-def test_phrase_override_does_not_request_audio_candidates():
-    from unittest.mock import patch
-    import numpy as np
-    from timing.audio_readings import use_audio_readings
-    from timing.llm_splitter import LlmConfig
-    with patch('timing.singing.pronunciation_overrides',return_value={'ja':{},'en':{},'zh':{'重庆':'chong qing'}}):
-        with use_audio_readings(LlmConfig('https://fixture.invalid/v1','fixture')) as session:
-            with patch.object(session.transport,'_chat',side_effect=AssertionError('manual pronunciation must win')):
-                session.prepare([Line('重庆',0,1,language='zh')],np.zeros(16000),16000)
-            assert session.transport.requests == 0
-
-
 def test_phrase_override_requires_matching_syllable_count_in_mms(monkeypatch):
     import timing.ctc as ctc
     monkeypatch.setattr(ctc, 'pronunciation_overrides', lambda:{'ja':{},'en':{},'zh':{'重庆':'chong'}})
     with pytest.raises(ValueError,match='拼音音节'):
         text_units('重庆',False,language='zh')
-
-
-def test_chinese_reading_helper_is_valid_and_english_only_is_dormant():
-    plan = plan_request('[00:01]你好 Hello',language='zh-en',llm_audio_reading=True)
-    assert plan.llm_audio_reading and plan.needs_llm
-    plan = plan_request('[00:01]Hello',language='zh-en',llm_audio_reading=True)
-    assert not plan.llm_audio_reading and not plan.needs_llm
 
 
 def test_ttml_chinese_and_roman_language_tags_preserve_display():
@@ -132,19 +113,16 @@ def test_ttml_chinese_and_roman_language_tags_preserve_display():
     assert any(span.get(f'{{{XML}}}lang') == 'zh-Latn' for span in root.iter(f'{{{TT}}}span'))
 
 
-def test_native_mandarin_converter_and_display_plan_never_use_kana(monkeypatch):
+def test_native_mandarin_converter_and_display_plan_preserve_units(monkeypatch):
     from timing.config import MODELS
     if not (MODELS / 'tifa/deps/g2pflow').is_dir(): pytest.skip('native TIFA G2P not installed')
     monkeypatch.syspath_prepend(str(MODELS / 'tifa/deps'))
     from timing.chinese_tifa import ensure_registered
-    from timing.audio_readings import native_candidates
     from timing.tifa_worker import display_plans
     converter = ensure_registered()(overrides={'重':'zhong'})
-    with native_candidates({'行':['hang','xing']}):
-        words = converter.convert('重庆银行')
+    words = converter.convert('重庆银行')
     assert [word.text for word in words] == list('重庆银行')
     assert words[0].readings[0].paths[0][0].script == 'zhong'
-    assert [r.paths[0][0].script for r in words[-1].readings] == ['hang','xing']
     choices = [{'scripts':['ni'],'phonemes':['zh/n','zh/i']}]
     assert display_plans(['你'],choices,MODELS/'tifa')[0][0]['flags'] == ['chinese_character']
 

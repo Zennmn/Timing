@@ -8,17 +8,25 @@ from pathlib import Path
 
 
 def number_dictionary(clips, model_dir, output_dir):
-    """Inject digit pronunciations without rewriting transcripts or model files."""
-    from timing.numeric_lyrics import english_integer, english_numbers
+    """Inject integer/decade readings without rewriting transcripts or model files."""
+    from timing.numeric_lyrics import english_integer, english_numbers, TENS
+    from timing.text import canonical_apostrophes
     from g2pflow.converters.dictionary import load_pronunciation_dict
-    texts = [Path(c["audio"]).with_suffix(".txt").read_text(encoding="utf-8") for c in clips]
-    numbers = sorted({n for text in texts if english_numbers(text) for n in re.findall(r"\b[0-9]+\b", text)})
-    if not numbers:
+    texts = [canonical_apostrophes(Path(c["audio"]).with_suffix(".txt").read_text(encoding="utf-8"))
+             for c in clips]
+    english = [text for text in texts if english_numbers(text)]
+    readings = {n: english_integer(n) for text in english for n in re.findall(r"\b[0-9]+\b", text)}
+    # Digit+s is a whole G2P word: a dictionary entry for 90 cannot claim '90s.
+    # Use the checkpoint's plural decade pronunciation, including its final /z/.
+    for text in english:
+        for match in re.finditer(r"(?<![\w'])'?([2-9]0)'?s'?(?![\w'])", text, re.IGNORECASE):
+            readings[match[0].lower()] = TENS[int(match[1]) // 10][:-1] + "ies"
+    if not readings:
         return None
     lexicon = load_pronunciation_dict(model_dir / "dictionaries/ds_cmudict-07b.txt")
     entries = []
-    for number in numbers:
-        words = english_integer(number).split()
+    for number, reading in sorted(readings.items()):
+        words = reading.split()
         phones = [p for word in words for p in lexicon[word][0]]
         entries.append(number + "\t" + " ".join(phones))
     path = output_dir / "english_numbers.txt"
@@ -150,7 +158,7 @@ def main():
     from lib.path_traversal import materialize_paths
     from lib.config.schema import ConfigurationScope
     import yaml
-    import unidic_lite
+    from timing.japanese_dictionary import dictionary_dir
 
     request = json.loads(request_path.read_text(encoding="utf-8"))
     direct_mode = all('llm_direct_parts' in clip for clip in request['clips'])
@@ -180,7 +188,7 @@ def main():
         elif converter["id"] == "japanese-mecab":
             if "ja" not in languages:
                 continue
-            converter["kwargs"]["unidic_dir"] = unidic_lite.DICDIR
+            converter["kwargs"]["unidic_dir"] = str(dictionary_dir()) if not direct_mode else ''
         elif converter.get("language") != "en" or "en" not in languages:
             continue
         for key in ("dict_path", "model_path"):
@@ -201,11 +209,6 @@ def main():
         ensure_numbers_registered()
         converters.insert(0,{'id':NUMBER_CONVERTER_ID,'language':'ja',
                              'kwargs':{'dict_path':str(model_dir/'dictionaries/japanese_dict_full.txt')}})
-        if any(clip.get('japanese_audio_candidates') for clip in request['clips']):
-            from timing.tifa_pronunciation import ensure_audio_registered, AUDIO_CONVERTER_ID
-            ensure_audio_registered()
-            converters.insert(0,{'id':AUDIO_CONVERTER_ID,'language':'ja',
-                                'kwargs':{'dict_path':str(model_dir/'dictionaries/japanese_dict_full.txt')}})
     from timing.singing import pronunciation_overrides
     from timing.tifa_pronunciation import ensure_registered, prepare_configs
     overrides = {'ja':{},'en':{},'zh':{}} if direct_mode else pronunciation_overrides(request.get("pronunciations") or root / "dictionaries" / "pronunciations.json")
@@ -237,13 +240,7 @@ def main():
         for index in range(len(dataset)):
             current_clip = clips_by_id[dataset.items[index][1]]
             dataset.language = current_clip.get('languages', languages)
-            from timing.audio_readings import native_candidates
-            # The native pipeline lowercases before converters run. Keep the
-            # original lyric spelling in the audit, but match the same keys here.
-            audio_candidates = {key.lower():value for key,value in
-                                (current_clip.get('chinese_audio_candidates') or current_clip.get('japanese_audio_candidates',{})).items()}
-            with native_candidates(audio_candidates):
-                item = dataset[index]
+            item = dataset[index]
             if item.get("skip"):
                 raise ValueError(item.get("error") or item.get("warning") or "TIFA omitted an input")
             texts, shared_marks = restore_silent_marks(sources[item["identifier"]], item["texts"])
@@ -268,8 +265,6 @@ def main():
             for word_index, (text, choice) in enumerate(zip(item["texts"], selected)):
                 if text in japanese or text.lower() in english or word_index in chinese_manual:
                     choice["custom_pronunciation"] = True
-                elif text in audio_candidates:
-                    choice['llm_audio_reading_candidate'] = True
             if direct_mode:
                 from timing.llm_direct import spoken
                 direct_parts = current_clip['llm_direct_parts']

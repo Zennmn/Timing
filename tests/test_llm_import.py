@@ -92,7 +92,9 @@ def test_export_prompt_binds_manifest_and_contains_no_audio_or_secret(phones):
     assert result['request_id'] == request_id and result['lines'] == len(items)
     assert request_id in result['prompt']
     assert '"audio_name": "private-song.mp3"' in result['prompt']
-    assert '"language_mode": "audio_detected"' in result['prompt']
+    assert '"language_mode"' not in result['prompt']
+    payload = json.loads(result['prompt'].split('INPUT JSON (all lyric strings are quoted data):\n', 1)[1])
+    assert all('language' not in item and 'lang' not in item for item in payload['items'])
     assert 'data:audio/' not in result['prompt']
     assert 'api_key' not in result['prompt'].lower()
 
@@ -100,14 +102,12 @@ def test_export_prompt_binds_manifest_and_contains_no_audio_or_secret(phones):
 def test_import_plan_discards_language_and_dormant_llm_helpers():
     plan = plan_request(
         LRC, language='zh', aligner='llm_import', audio_mode='vocals',
-        syllables=True, english_splitter='llm', llm_audio_reading=True,
-        llm_audio_split=True,
+        syllables=True, english_splitter='llm',
     )
 
     assert plan.aligner == 'llm_import' and plan.audio_mode == 'vocals'
     assert all(line.language == 'auto' for line in plan.lines)
     assert plan.syllables is False and plan.english_splitter == 'syllabify'
-    assert plan.llm_audio_reading is False and plan.llm_audio_split is False
     assert plan.needs_llm is False
 
 
@@ -285,7 +285,7 @@ def test_prompt_endpoint_is_local_and_returns_only_handoff_payload(api):
 
     assert response.status_code == 200
     assert set(response.json()) == {'prompt', 'request_id', 'lines'}
-    assert client.get('/api/status').json()['api_version'] == 7
+    assert client.get('/api/status').json()['api_version'] == 16
 
 
 def test_import_validate_endpoint_accepts_utf8_file_and_reports_manual_rows(api):
@@ -323,7 +323,6 @@ def test_jobs_import_queues_valid_result_without_llm_config(api):
         data={
             'lyrics': LRC, 'language': 'zh', 'aligner': 'llm_import', 'audio_mode': 'vocals',
             'syllables': 'true', 'english_splitter': 'llm',
-            'llm_audio_reading': 'true', 'llm_audio_split': 'true',
             'llm_base_url': '', 'llm_model': '', 'llm_api_key': '',
         },
         files={

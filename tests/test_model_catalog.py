@@ -15,11 +15,11 @@ def downloader():
     return module
 
 
-def test_catalog_contains_only_the_five_required_groups():
-    assert list(MODELS) == ["ctc", "tifa", "singing", "bs_lead", "separator"]
+def test_catalog_contains_only_the_four_required_groups():
+    assert list(MODELS) == ["ctc", "tifa", "bs_lead", "separator"]
     assert [spec.installer for spec in MODELS.values()] == [
-        "download_ctc.py", "download_tifa.py", "download_sofa.py",
-        "download_bs_karaoke.py", "download_separator.py",
+        "download_ctc.py", "download_tifa.py", "download_bs_karaoke.py",
+        "download_separator.py",
     ]
     for spec in MODELS.values():
         assert spec.label and spec.folder and spec.purpose
@@ -38,8 +38,8 @@ def test_installer_installs_every_group_in_order(monkeypatch):
     monkeypatch.setattr(module.subprocess, "run", lambda args, **kw: calls.append((args, kw)))
     module.install()
     assert [Path(args[-1]).name for args, kw in calls] == [
-        "download_ctc.py", "download_tifa.py", "download_sofa.py",
-        "download_bs_karaoke.py", "download_separator.py",
+        "download_ctc.py", "download_tifa.py", "download_bs_karaoke.py",
+        "download_separator.py",
     ]
     assert all(kw["check"] and args[0] == module.sys.executable for args, kw in calls)
 
@@ -49,7 +49,7 @@ def test_dry_run_list_and_inventory_never_install(tmp_path, monkeypatch, capsys)
     monkeypatch.setattr(module, "install", lambda: pytest.fail("unexpected installation"))
     monkeypatch.setattr(module, "MODELS_DIR", tmp_path)
     module.main(["--dry-run"])
-    assert json.loads(capsys.readouterr().out)["models"] == ["ctc", "tifa", "singing", "bs_lead", "separator"]
+    assert json.loads(capsys.readouterr().out)["models"] == ["ctc", "tifa", "bs_lead", "separator"]
     module.main(["--list"])
     listing = capsys.readouterr().out
     assert "separator: Kim MelBand vocals" in listing
@@ -67,19 +67,23 @@ def test_removed_profile_and_model_flags_are_rejected():
             module.main(args)
 
 
-def test_inventory_reports_only_the_five_required_folders_without_deleting(tmp_path):
+def test_inventory_reports_only_the_four_required_folders_without_deleting(tmp_path):
     ctc = tmp_path / MODELS["ctc"].folder
     ctc.mkdir(parents=True)
     (ctc / "weights").write_bytes(b"123")
     legacy = tmp_path / "hubertfa"
     legacy.mkdir()
     (legacy / "weights").write_bytes(b"4567")
+    sofa = tmp_path / "sofa"
+    sofa.mkdir()
+    (sofa / "cached.bin").write_bytes(b"legacy sofa cache")
     rows = {row["id"]: row for row in inventory(tmp_path)}
-    assert list(rows) == ["ctc", "tifa", "singing", "bs_lead", "separator"]
+    assert list(rows) == ["ctc", "tifa", "bs_lead", "separator"]
     assert rows["ctc"]["present"] and rows["ctc"]["bytes"] == 3
     assert not rows["tifa"]["present"] and rows["tifa"]["bytes"] == 0
     assert "hubertfa" not in rows
     assert (legacy / "weights").read_bytes() == b"4567"
+    assert (sofa / "cached.bin").read_bytes() == b"legacy sofa cache"
 
 
 def test_japanese_mms_frontend_works_without_sofa_assets(tmp_path, monkeypatch):
@@ -98,12 +102,44 @@ def test_english_frontend_can_use_cmu_without_sofa(tmp_path, monkeypatch):
     from timing import singing
     from timing.schema import Unit
     monkeypatch.setattr(singing, "SOFA_DIR", tmp_path / "no-sofa")
+    monkeypatch.setattr(singing, "TIFA_DIR", tmp_path / "no-tifa")
     singing.dictionary.cache_clear()
     try:
         result = singing.english_parts(Unit("hello", "hello"), False)
         assert result[0][0] == "hello" and result[0][1]
     finally:
         singing.dictionary.cache_clear()
+
+
+def test_pronunciation_frontends_read_tifa_dictionaries_without_sofa(tmp_path, monkeypatch):
+    from timing import singing
+    from timing.llm_text import local_parts
+    from timing.schema import Line, Unit
+
+    tifa = tmp_path / "tifa"
+    dictionaries = tifa / "dictionaries"
+    dictionaries.mkdir(parents=True)
+    (dictionaries / "ds_cmudict-07b.txt").write_text(
+        "hello\thh ax l ow\nhello\thh eh l ow\n", encoding="utf-8")
+    (dictionaries / "japanese_dict_full.txt").write_text(
+        "a\ta\ni\ti\nu\tu\ne\te\no\to\ncl\tcl\nn\tN\n"
+        "kya\tky a\nta\tt a\nti\tt i\nto\tt o\n", encoding="utf-8")
+    monkeypatch.setattr(singing, "SOFA_DIR", tmp_path / "no-sofa")
+    monkeypatch.setattr(singing, "TIFA_DIR", tifa)
+    singing.dictionary.cache_clear()
+    singing.japanese_dictionary.cache_clear()
+    singing.kana_converter.cache_clear()
+    try:
+        assert singing.english_parts(Unit("hello", "hello"), False)[0][1] == ["hh", "ax", "l", "ow"]
+        assert singing.japanese_dictionary()["ky"] == ["ky"]
+        assert singing.kana_phones("キャット") == ["ky", "a", "cl", "t", "o"]
+        assert singing.kana_phones("ティ") == ["t", "i"]
+        assert local_parts(Line("hello", language="en"))[0]["reading"] == ["hh", "ax", "l", "ow"]
+        assert not (tmp_path / "no-sofa").exists()
+    finally:
+        singing.dictionary.cache_clear()
+        singing.japanese_dictionary.cache_clear()
+        singing.kana_converter.cache_clear()
 
 
 def test_tifa_readiness_rejects_missing_pronunciation_assets(tmp_path, monkeypatch):

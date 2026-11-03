@@ -60,6 +60,11 @@ def phone_inventory():
     return frozenset(json.loads((MODELS/'tifa/vocabulary.json').read_text())['symbols'])
 
 
+def acoustic_languages(parts):
+    scopes = {part['lang'] for part in parts}
+    return [lang for lang in ('ja', 'zh', 'en') if lang in scopes]
+
+
 @lru_cache(maxsize=1)
 def kana_converter():
     sys.path.insert(0, str(MODELS/'tifa/deps'))
@@ -82,13 +87,15 @@ def compile_parts(text, parts, language='ja'):
         raise ValueError('parts 必须为有界分段数组。')
     if not parts:
         return []
-    languages = ('ja','zh','en') if language == 'auto' else ('zh','en') if chinese.is_chinese(language) else ('ja','en')
+    languages = (('ja','zh','en') if language == 'auto' else ('en',) if language == 'en'
+                 else ('zh','en') if chinese.is_chinese(language) else ('ja','en'))
     compiled = []
     for part in parts:
         if not isinstance(part, dict) or set(part)!={'text','lang','reading'}:
             raise ValueError('分段仅允许 text/lang/reading；禁止时间或额外字段。')
         surface, lang, reading = part['text'], part['lang'], part['reading']
-        if not isinstance(surface,str) or not surface or not spoken(surface) or lang not in languages:
+        if (not isinstance(surface,str) or not surface or
+                not any(c.isalnum() for c in spoken(surface)) or lang not in languages):
             raise ValueError('分段文字、语言无效；标点和空格请附在有发音的分段。')
         if lang=='en':
             if not isinstance(reading,list) or not 1<=len(reading)<=80 or any(not isinstance(p,str) for p in reading):
@@ -129,7 +136,8 @@ def compile_parts(text, parts, language='ja'):
 def write_pfml(audio, parts):
     nodes = []
     for part in parts:
-        node = ET.Element('word',text=spoken(part['text']),language=part['lang'])
+        language = part['lang']
+        node = ET.Element('word',text=spoken(part['text']),language=language)
         for group in part['groups']:
             ET.SubElement(node,'group',script=group['script'],phonemes=' '.join(group['phones']))
         nodes.append(ET.tostring(node,encoding='unicode'))
@@ -167,7 +175,7 @@ class DirectSession:
                 'requests':self.transport.requests,'repair_requests':self.transport.repair_requests,
                 'thinking':self.transport.report()['thinking'],
                 'prompt_sha256':hashlib.sha256(self.prompt.encode()).hexdigest(),
-                'request_mode':'whole_song', 'language_mode':'audio_detected',
+                'request_mode':'whole_song', 'language_mode':'audio_detected', 'language_hints_sent':False,
                 'automatic_repairs':False, 'audio_source':self.audio_source,
                 'audio_range':self.audio_range,'response_limit_bytes':MAX_RESPONSE_BYTES,
                 'error':self.error,
@@ -200,7 +208,7 @@ class DirectSession:
                     'role':line.role,'agent':line.agent,'parent':line.parent}
                    for record,line in zip(self.records,lines)]
             english=sorted(p.split('/',1)[1] for p in phone_inventory() if p.startswith('en/'))
-            payload={'audio_range':bounds,'audio_source':self.audio_source,'language_mode':'audio_detected',
+            payload={'audio_range':bounds,'audio_source':self.audio_source,
                      'english_phone_inventory':english,'items':items}
             self.log(f'LLM 整曲识别：完整 {bounds[1]:.2f} 秒音轨、{len(lines)} 行歌词，一次请求…')
             rows,error=self.transport._chat(payload,audio=audio,prompt=self.prompt,timeout=WHOLE_SONG_TIMEOUT,
@@ -255,7 +263,7 @@ def coarse_units(parts):
             roman=[]
             for p in phones:
                 if p=='cl':
-                    following=flat[position+1] if position+1<len(flat) else 't'
+                    following=flat[position+1].split('/',1)[-1] if position+1<len(flat) else 't'
                     roman.append('t' if following in ('ch','ts') else following[0].lower())
                 else:
                     roman.append(p.lower())
@@ -297,7 +305,7 @@ def locate(samples, rate, lines, records, log, background=None):
     return result
 
 
-def align(samples, rate, lines, output, records, log, background=None, coarse=None):
+def align(samples, rate, lines, output, records, log, background=None, coarse=None, *, trust_line_timestamps=False):
     from . import tifa
     folder=Path(output)/'tifa_direct'
     folder.mkdir(exist_ok=True)
@@ -313,7 +321,7 @@ def align(samples, rate, lines, output, records, log, background=None, coarse=No
         a=round(max(0,min(lines[j].start for j in neighbors)-.12)*rate)
         limit=min(len(wave)/rate,max(lines[j].end for j in neighbors)+.35)
         gate=None
-        if coarse:
+        if coarse and not trust_line_timestamps:
             last=neighbors[-1]
             limit,gate=tifa.quiet_crop_end(wave,rate,coarse[last]['end'],limit,coarse[last]['start'])
         b=round(limit*rate)
@@ -329,7 +337,7 @@ def align(samples, rate, lines, output, records, log, background=None, coarse=No
         clips.append({'id':f'line_{i+1:03}','audio':str(audio.resolve()),'start':a/rate,'end':b/rate,
                       'gate':gate,'target_start':start,'target_end':start+len(spoken(line.text)),
                       'llm_direct_parts':parts,'source_line':i+1,
-                      'languages':[lang for lang in ('ja','zh','en') if any(part['lang']==lang for part in parts)]})
+                      'languages':acoustic_languages(parts)})
         good.append(i)
     checks=[]
     if clips:

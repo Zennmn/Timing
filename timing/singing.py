@@ -1,11 +1,8 @@
-"""Singing alignment from SOFA acoustic evidence and forced decoding.
+"""Shared lyric pronunciation helpers and the legacy optional SOFA engine.
 
-SOFA runtime and checkpoints are pinned by scripts/download_sofa.py. Each
-language uses its own acoustic head and its own pinned front-end dictionary
-(Mandarin: the official opencpop-extension dictionary, never the Japanese
-head or a TIFA fallback); the supplied phoneme sequence determines which head
-supplies each state's emission. No duration division or zero-span repair is
-performed. SOFA's original MIT license is retained with its runtime.
+New MMS/TIFA routes use the pinned TIFA English and Japanese dictionaries for
+lexical phones; SOFA assets are not a runtime dependency for those helpers.
+The SOFA aligner remains for legacy callers and uses its own pinned assets.
 """
 import gc
 import hashlib
@@ -23,6 +20,9 @@ from .text import kept, tokenize, SMALL
 from .english_syllables import split_english, split_flags, prepare_llm_many, current_method, word_flags
 
 SOFA_DIR = MODELS / "sofa"
+TIFA_DIR = MODELS / "tifa"
+TIFA_ENGLISH_DICTIONARY = "dictionaries/ds_cmudict-07b.txt"
+TIFA_JAPANESE_DICTIONARY = "dictionaries/japanese_dict_full.txt"
 OVERRIDES = ROOT / "dictionaries" / "pronunciations.json"
 SOFA_CHECKPOINTS = {
     "ja": "ja/akm_ja_v001/model.ckpt",
@@ -73,21 +73,35 @@ def pronunciation_overrides(path=None):
 
 @lru_cache(maxsize=1)
 def japanese_dictionary():
-    # Identity labels shared with SOFA; MMS must not need SOFA assets for kana.
-    labels = "AP SP cl a i u e o N k ky s sh h hy g gy z zy d dy b by p py j f fy ch t ts ty n ny m my r ry y w"
-    return {phone: [phone] for phone in labels.split()}
+    """Return the label inventory pinned by TIFA's Japanese dictionary."""
+    source = TIFA_DIR / TIFA_JAPANESE_DICTIONARY
+    if not source.is_file():
+        raise RuntimeError("TIFA 日语发音词典未准备完整，请运行 scripts/download_tifa.py。")
+    labels = set()
+    for row in source.read_text(encoding="utf-8").splitlines():
+        if "\t" in row:
+            labels.update(row.split("\t", 1)[1].split())
+    required = {"a", "i", "u", "e", "o", "N", "cl"}
+    if not required <= labels:
+        raise ValueError("TIFA 日语发音词典缺少基础音素，请重新校验模型。")
+    return {phone: [phone] for phone in sorted(labels)}
 
 
 @lru_cache(maxsize=1)
 def dictionary():
+    """English lexical phones from TIFA's pinned CMU dictionary.
+
+    The caller falls back to the installed ``cmudict`` package when TIFA's
+    dictionary is unavailable. SOFA dictionaries are no longer a runtime input.
+    """
     rows = {}
-    source = SOFA_DIR / "en/dictionary.txt"
+    source = TIFA_DIR / TIFA_ENGLISH_DICTIONARY
     if not source.is_file():
         return rows  # english_parts can use the installed CMU dictionary.
     for row in source.read_text(encoding="utf-8").splitlines():
         if "\t" in row:
             word, phones = row.split("\t", 1)
-            rows[word] = phones.split()
+            rows.setdefault(word.strip().lower().replace("’", "'"), phones.split())
     return rows
 
 
@@ -107,8 +121,9 @@ def mandarin_dictionary():
 
 @lru_cache(maxsize=1)
 def kana_converter():
-    import pykakasi
-    return pykakasi.kakasi()
+    sys.path.insert(0, str(MODELS / "tifa" / "deps"))
+    from g2pflow.converters.japanese import JapaneseKanaConverter
+    return JapaneseKanaConverter(dict_path=str(TIFA_DIR / TIFA_JAPANESE_DICTIONARY))
 
 
 def katakana(text):
@@ -133,13 +148,15 @@ def kana_phones(reading):
                 raise ValueError(f"長音の読みを解釈できません：{reading}")
             phones.append(phones[-1])
         else:
-            roman = "".join(x["hepburn"] for x in kana_converter().convert(mora))
-            if mora == "ヲ":
-                roman = "o"
-            parts = re.findall(r"ky|gy|sh|ch|ts|hy|ny|my|ry|by|py|fy|ty|dy|zy|[a-z]", roman)
-            if not parts or "".join(parts) != roman:
+            try:
+                groups = [group for word in kana_converter().convert(mora)
+                          for group in word.readings[0].paths[0]]
+            except (KeyError, IndexError) as exc:
+                raise ValueError(f"无法转换日语读音：{reading}") from exc
+            converted = [phone for group in groups for phone in group.phonemes]
+            if not converted:
                 raise ValueError(f"无法转换日语读音：{reading}")
-            phones.extend(parts)
+            phones.extend(converted)
     table = japanese_dictionary()
     missing = [phone for phone in phones if phone not in table]
     if missing:

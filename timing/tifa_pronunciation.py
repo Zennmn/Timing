@@ -17,7 +17,6 @@ from pathlib import Path
 
 CONVERTER_ID = "timing-ja-overrides"
 NUMBER_CONVERTER_ID = 'timing-ja-numbers'
-AUDIO_CONVERTER_ID = 'timing-ja-audio'
 LOANWORD_CONVERTER_ID = 'timing-ja-loanwords'
 APOSTROPHE_PREPROCESSOR_ID = 'timing-apostrophes'
 
@@ -194,38 +193,6 @@ def ensure_numbers_registered():
 
     register(id=NUMBER_CONVERTER_ID,language='ja')(JapaneseNumberConverter)
     return JapaneseNumberConverter
-
-
-def ensure_audio_registered():
-    """Per-clip lexical alternatives; native TIFA scores their acoustic fit."""
-    from g2pflow.registry import converter as register, get_converter, list_converters
-    if AUDIO_CONVERTER_ID in list_converters():
-        return get_converter(AUDIO_CONVERTER_ID)
-    from g2pflow.converters.base import G2PWord
-    from g2pflow.converters.japanese import JapaneseKanaConverter
-    from .audio_readings import current_native_candidates
-    base=ensure_registered()
-
-    class JapaneseAudioConverter(base):
-        def __init__(self,dict_path):
-            self._kana=JapaneseKanaConverter(dict_path=dict_path)
-            self._spans_cache={}
-
-        def find(self,text):
-            self._overrides=current_native_candidates()
-            if not self._overrides:
-                return None
-            self._longest=max(map(len,self._overrides))
-            return super().find(text)
-
-        def _convert_word(self,text):
-            readings=current_native_candidates().get(text,[])
-            if not readings:
-                raise ValueError('未找到本片段的日语音频读音候选。')
-            return G2PWord(text,readings=[self._reading(text,kana) for kana in readings])
-
-    register(id=AUDIO_CONVERTER_ID,language='ja')(JapaneseAudioConverter)
-    return JapaneseAudioConverter
 
 
 def ensure_loanwords_registered():

@@ -191,7 +191,7 @@ def test_no_network_when_word_level_or_non_llm_mode(monkeypatch,tmp_path):
         seen.append(syllables)
         lines[0].words=[Unit(lines[0].text,lines[0].text,start=.1,end=.4)]
         lines[0].start,lines[0].end=.1,.4
-    monkeypatch.setattr(alignment,'align_sofa',route)
+    monkeypatch.setattr(alignment,'align_tifa',route)
     assert pipeline.run(tmp_path/'song','hello',tmp_path,english_splitter='llm',syllables=False)['status']=='complete'
     assert pipeline.run(tmp_path/'song','hello',tmp_path,english_splitter='pyphen')['status']=='complete'
     assert seen==[False,True]

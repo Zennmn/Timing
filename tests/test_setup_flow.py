@@ -270,7 +270,9 @@ def test_success_runs_gpu_probe_before_models(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert result.setup_exit == 0
-    assert result.calls == ("uv sync", "verify_gpu.py", "download_models.py")
+    assert result.calls == ("uv sync", "verify_gpu.py", "download_unidic.py", "download_models.py")
+    assert "四组模型" in result.output
+    assert "五组模型" not in result.output
     assert result.status is not None
     assert result.status["stage"] == "complete"
     assert result.status["status"] == "complete"
@@ -281,10 +283,19 @@ def test_skip_models_still_syncs_and_verifies_gpu(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert result.setup_exit == 0
-    assert result.calls == ("uv sync", "verify_gpu.py")
+    assert result.calls == ("uv sync", "verify_gpu.py", "download_unidic.py")
+    assert "四组模型" in result.output
+    assert "五组模型" not in result.output
     assert result.status is not None
     assert result.status["stage"] == "complete"
     assert result.status["status"] == "complete"
+
+
+def test_failed_dictionary_install_preserves_models_and_stops_setup(tmp_path: Path) -> None:
+    result = _run_setup(tmp_path, command_codes={"download_unidic.py": 5})
+    assert result.returncode == result.setup_exit == 1
+    assert result.calls == ("uv sync", "verify_gpu.py", "download_unidic.py")
+    assert result.status["stage"] == "dictionary" and result.status["status"] == "failed"
 
 
 def test_dependency_failure_retries_three_times_then_stops_and_logs(tmp_path: Path) -> None:

@@ -18,8 +18,8 @@ from timing.schema import Line
 
 
 LYRICS = '[00:01.00]hi\n[00:04.00]bye\n'
-# The original Japanese profile shares the revised English word-boundary rules.
-ORIGINAL_TEXT_SHA256 = '9d9d9c721ef049b95fd848e59e011cfc828c203c06e27ef6f3bdc8dcaca4bac7'
+# Original grouping retains the revised Japanese/English rules.
+ORIGINAL_TEXT_SHA256 = '59796e14f7ae0964cc404a6e60c47eb3445ce25e3b93a0b20bd10ce7e3d1cbee'
 
 
 @pytest.fixture
@@ -200,7 +200,7 @@ def test_prompt_api_uses_selected_profile_and_rejects_unknown(api, monkeypatch):
     assert original.json() == export_prompt(LYRICS, 'song.wav', prompt_profile='original')
     assert set(default.json()) == {'prompt', 'request_id', 'lines'}
     assert invalid.status_code == 400
-    assert client.get('/api/status').json()['api_version'] == 7
+    assert client.get('/api/status').json()['api_version'] == 16
 
 
 def test_jobs_forwards_profile_positionally_only_for_direct(api, monkeypatch):

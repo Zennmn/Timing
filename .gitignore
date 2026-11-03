@@ -40,6 +40,7 @@ dist/
 !/scripts/download_separator.py
 !/scripts/download_sofa.py
 !/scripts/download_tifa.py
+!/scripts/download_unidic.py
 !/scripts/tifa-requirements.txt
 !/scripts/verify_gpu.py
 !/scripts/check_publication.py

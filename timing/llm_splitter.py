@@ -127,22 +127,16 @@ class LlmSession:
         self.requests, self.failures, self.disabled = 0, 0, False
         self.repair_requests = 0
         self.request_batches = []
-        self.audio_enabled, self.audio_data, self.audio_scope = False, None, None
-        self.audio_sources = None
         self.client = httpx.Client(timeout=httpx.Timeout(300 if config.thinking_mode == 'on' else 90,connect=15),follow_redirects=False)
 
     def close(self):
         self.client.close()
 
-    def system_prompt(self,audio=False):
-        if not audio:
-            return self.prompt
-        return self.prompt.replace('You do not hear audio and must not infer singing timing.',
-            'You receive the actual sung audio. Use it to choose conservative spelling/phone grouping; the supplied selected phones remain authoritative. Musical notes or a held vowel alone do not add linguistic syllables. Never infer timestamps.')
+    def system_prompt(self):
+        return self.prompt
 
     def _chat(self, payload, repair=False, *, audio=None, prompt=None, timeout=None, max_response_bytes=2*1024**2):
-        audio = audio or self.audio_data
-        system = prompt or self.system_prompt(bool(audio))
+        system = prompt or self.system_prompt()
         content = json.dumps(payload,ensure_ascii=False)
         if audio:
             content = [{'type':'input_audio','input_audio':{'data':audio}}, {'type':'text','text':content}]
@@ -197,31 +191,7 @@ class LlmSession:
         self.prepare_many([(entries,context)])
 
     def key(self,word,phones):
-        base = (word,tuple(phones))
-        return (*base,self.audio_scope) if self.audio_enabled else base
-
-    @contextmanager
-    def audio_line(self,line):
-        if not self.audio_enabled:
-            yield
-            return
-        from .audio_readings import clip_audio
-        previous = self.audio_data,self.audio_scope
-        try:
-            if self.audio_sources is None:
-                self.audio_data,self.audio_scope = None,'unavailable'
-            else:
-                samples,rate,background = self.audio_sources
-                wave = background if line.role == 'bg' and background is not None else samples
-                try:
-                    self.audio_data,bounds = clip_audio(wave,rate,line.start,line.end)
-                    digest = hashlib.sha256(self.audio_data.encode()).hexdigest()[:16]
-                    self.audio_scope = f'{bounds[0]}:{bounds[1]}:{digest}'
-                except ValueError:
-                    self.audio_data,self.audio_scope = None,f'unavailable:{line.start}:{line.end}'
-            yield
-        finally:
-            self.audio_data,self.audio_scope = previous
+        return (word,tuple(phones))
 
     def prepare_many(self, groups):
         """Collect across the song before sending. Share context text by ID.
@@ -244,22 +214,19 @@ class LlmSession:
                     examples.append(context[:2000])
         pending = list(contexts)
         if pending:
-            if self.audio_enabled:
-                self.log(f'LLM 听音拆分：本句 {len(pending)} 个新词／读音；按音频片段分别请求，同词在不同片段分别校对。')
-            else:
-                self.log(f'LLM 汇总：{len(pending)} 个不同的新词／读音，最多 {MAX_BATCH_WORDS} 个一批。')
+            self.log(f'LLM 汇总：{len(pending)} 个不同的新词／读音，最多 {MAX_BATCH_WORDS} 个一批。')
         for start in range(0,len(pending),MAX_BATCH_WORDS):
             batch = pending[start:start+MAX_BATCH_WORDS]
             items = [{'id':f'w{i}','word':key[0],'phones':list(key[1])} for i,key in enumerate(batch)]
             unresolved = {item['id']:key for item,key in zip(items,batch)}
             errors = {}
-            if self.disabled or (self.audio_enabled and not self.audio_data):
-                reason = '未取得有效逐句音频，保留整词' if not self.disabled else '此前接口请求失败，本任务停止继续请求'
+            if self.disabled:
+                reason = '此前接口请求失败，本任务停止继续请求'
             else:
                 reason = '映射校验未通过'
                 errors = {}
                 for attempt in range(2):
-                    stage = '修正重试' if attempt else ('听音首发' if self.audio_enabled else '批量首发')
+                    stage = '修正重试' if attempt else '批量首发'
                     self.log(f'LLM 英语拆分：{len(unresolved)} 个新词（{stage}，第 {self.requests+1} 次请求）…')
                     context_ids = {}
                     active = []
@@ -302,7 +269,7 @@ class LlmSession:
                     if not unresolved:
                         break
             if unresolved:
-                self.failures += int(not self.audio_enabled or bool(self.audio_data))
+                self.failures += 1
                 if self.failures >= 2:
                     self.disabled = True
                 self.log(f'LLM 拆分未采用：{reason}；{len(unresolved)} 个词保留整词模型时间。')
@@ -312,7 +279,7 @@ class LlmSession:
                 self.cache[key] = {'parts':None,'status':'fallback','reason':errors.get(item_id,reason) if not self.disabled else reason}
             for key in batch:
                 value = self.cache[key]
-                self.records.append({'word':key[0],'phones':list(key[1]),**({'audio_scope':key[2]} if self.audio_enabled else {}),**value})
+                self.records.append({'word':key[0],'phones':list(key[1]),**value})
 
     def split(self,word,phones):
         self.prepare([(word,phones)])
@@ -322,8 +289,7 @@ class LlmSession:
         return self.cache.get(self.key(word,phones),{}).get('status') == 'fallback'
 
     def report(self):
-        return {'model':self.config.model,'protocol':'chat_completions','prompt_sha256':hashlib.sha256(self.system_prompt(self.audio_enabled).encode()).hexdigest(),
-                'audio_enabled':self.audio_enabled,
+        return {'model':self.config.model,'protocol':'chat_completions','prompt_sha256':hashlib.sha256(self.system_prompt().encode()).hexdigest(),
                 'thinking':{'mode':self.config.thinking_mode,'format':self.config.thinking_format,
                             'requested_parameters':self.config.thinking_parameters()},
                 'requests':self.requests,'fallback_words':sum(r['status']=='fallback' for r in self.records),

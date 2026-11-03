@@ -1184,6 +1184,15 @@ wheels = [
 ]
 
 [[package]]
+name = "plac"
+version = "1.4.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d6/5f/40553c01a1d1424118196e7c29defe40715fd5f56939b9c824aa480112cd/plac-1.4.7.tar.gz", hash = "sha256:957ffbab8ea8ab8c0b9f2694daa2a95f3560151cd162bcbc91e97ff94d45c4f9", size = 39095, upload-time = "2026-09-07T15:06:57.54Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/14/f1/405c082aeb4ec5ec0744d1e059d9da9530bb7aaa8fd5dafae97706a2cfcd/plac-1.4.7-py2.py3-none-any.whl", hash = "sha256:8af4bcd5d52e06c31fab641bffb7040d0eb0e579e2f70a4d2e87af5eed0612ea", size = 22001, upload-time = "2026-09-07T15:06:56.691Z" },
+]
+
+[[package]]
 name = "platformdirs"
 version = "4.13.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1677,7 +1686,7 @@ wheels = [
 
 [[package]]
 name = "timing-local"
-version = "0.13.0"
+version = "0.22.0"
 source = { editable = "." }
 dependencies = [
     { name = "cmudict" },
@@ -1705,7 +1714,7 @@ dependencies = [
     { name = "torch" },
     { name = "torchaudio" },
     { name = "transformers" },
-    { name = "unidic-lite" },
+    { name = "unidic" },
     { name = "uvicorn" },
 ]
 
@@ -1741,7 +1750,7 @@ requires-dist = [
     { name = "torch", specifier = ">=2.7,<3", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchaudio", specifier = ">=2.7,<3", index = "https://download.pytorch.org/whl/cu128" },
     { name = "transformers", specifier = ">=5.13.0,<6" },
-    { name = "unidic-lite", specifier = ">=1.0.8" },
+    { name = "unidic", specifier = "==1.1.0" },
     { name = "uvicorn", specifier = ">=0.34" },
 ]
 
@@ -1913,10 +1922,16 @@ wheels = [
 ]
 
 [[package]]
-name = "unidic-lite"
-version = "1.0.8"
+name = "unidic"
+version = "1.1.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/55/2b/8cf7514cb57d028abcef625afa847d60ff1ffbf0049c36b78faa7c35046f/unidic-lite-1.0.8.tar.gz", hash = "sha256:db9d4572d9fdd4d00a97949d4b0741ec480ee05a7e7e2e32f547500dae27b245", size = 47356746, upload-time = "2021-01-25T06:07:54.719Z" }
+dependencies = [
+    { name = "plac" },
+    { name = "requests" },
+    { name = "tqdm" },
+    { name = "wasabi" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5a/09/271dfbf8d5b56adddc70e30fa94249f5d3ab35f615bf278d65258045564a/unidic-1.1.0.tar.gz", hash = "sha256:0ab91c05de342c84d2a6314901fd3afb9061ecd7534dd4a0431dccbb87d921b7", size = 7688, upload-time = "2021-10-10T08:56:44.301Z" }
 
 [[package]]
 name = "urllib3"
@@ -1938,6 +1953,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/da/34/30e9280707135d2cfc589dfff3cb796bd07a3aeb1a3e415ba09dd89d7bb4/uvicorn-0.54.0.tar.gz", hash = "sha256:a2e33cbfaa0306f8e6b0c13e0cb89d7d7a2da3e62b90c66e18c33d9807b28620", size = 112283, upload-time = "2026-09-25T06:52:37.601Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl", hash = "sha256:505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf", size = 87427, upload-time = "2026-09-25T06:52:35.829Z" },
+]
+
+[[package]]
+name = "wasabi"
+version = "0.10.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/69/41/0c31737ee1a29c8b829690ebb4ab988b1f489aa2c3efa115a732a9dd7997/wasabi-0.10.1.tar.gz", hash = "sha256:c8e372781be19272942382b14d99314d175518d7822057cb7a97010c4259d249", size = 28380, upload-time = "2022-07-28T08:17:54.968Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/34/74/bd566f876c2de097e75d525c2696fb9829009987a0d93a4fb3576778a0a8/wasabi-0.10.1-py3-none-any.whl", hash = "sha256:fe862cc24034fbc9f04717cd312ab884f71f51a8ecabebc3449b751c2a649d83", size = 26075, upload-time = "2022-07-28T08:17:53.504Z" },
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-"""Explicit installation of all five required model groups; inference never invokes this script."""
+"""Explicit installation of all four required model groups; inference never invokes this script."""
 import argparse
 import json
 import os
@@ -130,7 +130,7 @@ def install(attempts=3, *, log_dir=None, status_path=None, sleeper=time.sleep):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Timing model installation; defaults to installing all five required groups")
+    parser = argparse.ArgumentParser(description="Timing model installation; defaults to installing all four required groups")
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--list", action="store_true", help="List the required groups without downloads")
     action.add_argument("--inventory", action="store_true", help="Report existing folder sizes as JSON; never deletes")

@@ -74,7 +74,8 @@ def check(lines, duration):
 
 def export(lines, duration, language="ja", title=""):
     check(lines, duration)
-    export_language = 'zh-CN' if language in ('zh', 'zh-en') else 'en' if language == 'en' else 'mul' if language == 'auto' else 'ja'
+    export_language = ('zh-CN' if language in ('zh', 'zh-en')
+                       else 'en' if language == 'en' else 'mul' if language == 'auto' else 'ja')
     root = ET.Element(f"{{{TT}}}tt", {f"{{{XML}}}lang": export_language})
     head = ET.SubElement(root, f"{{{TT}}}head")
     metadata = ET.SubElement(head, f"{{{TT}}}metadata")
@@ -93,7 +94,8 @@ def export(lines, duration, language="ja", title=""):
             ET.SubElement(parent, f"{{{TT}}}span", {f"{{{TTM}}}role": "x-translation", f"{{{XML}}}lang": "zh-CN"}).text = line.translation
         if line.roman:
             effective_language = line.language if line.language != 'auto' else language
-            roman_language = 'zh-Latn' if effective_language in ('zh','zh-en') else 'en' if effective_language == 'en' else 'ja-Latn'
+            roman_language = ('zh-Latn' if effective_language in ('zh','zh-en')
+                              else 'en' if effective_language == 'en' else 'ja-Latn')
             ET.SubElement(parent, f"{{{TT}}}span", {f"{{{TTM}}}role": "x-roman", f"{{{XML}}}lang": roman_language}).text = line.roman
 
     mains = sorted(((i, line) for i, line in enumerate(lines) if line.role == "main"), key=lambda pair: bounds(pair[1])[0])

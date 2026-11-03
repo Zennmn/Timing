@@ -12,6 +12,8 @@ LATIN = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]+(?:['’][A-Za-z]+)*|[0-9]+")
 JAPANESE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff々〆〤ー]+")
 SMALL = set("ゃゅょぁぃぅぇぉゎャュョァィゥェォヮ")
 LRC = re.compile(r"^\[(\d+):(\d+(?:\.\d+)?)\](.*)$")
+LRC_END = re.compile(r"\[(\d+):(\d+(?:\.\d+)?)\]$")
+LRC_INLINE_TIME = re.compile(r"[\[<]\s*-?\d+:")
 
 
 def kept(text):
@@ -25,11 +27,8 @@ def canonical_apostrophes(text):
 
 @lru_cache(maxsize=1)
 def tagger():
-    import fugashi
-    import unidic_lite
-    from pathlib import Path
-    dictionary = Path(unidic_lite.DICDIR)
-    return fugashi.Tagger(f'-r "{(dictionary / "mecabrc").as_posix()}" -d "{dictionary.as_posix()}"')
+    from .japanese_dictionary import make_tagger
+    return make_tagger()
 
 
 @lru_cache(maxsize=1)
@@ -111,6 +110,33 @@ def tokenize(text, fine=True, english_syllables=True):
     return [u for u in units if u.spoken]
 
 
+def parse_lrc(text: str) -> list[Line]:
+    """Read plain/LRC rows, leaving omitted ends unset for the caller to infer."""
+    lines = []
+    for raw in text.lstrip("\ufeff").splitlines():
+        raw = raw.strip()
+        if not raw or re.match(r"^\[(?:ar|ti|al|by|offset|length):", raw, re.I):
+            continue
+        match = LRC.match(raw)
+        if match:
+            body = match[3].strip()
+            if LRC.match(body):
+                raise ValueError("请把多个 LRC 时间标签展开为独立歌词行，以保留每次副歌。")
+            tail = LRC_END.search(body)
+            end = None
+            if tail:
+                end = float(tail[1]) * 60 + float(tail[2])
+                body = body[:tail.start()].rstrip()
+            if LRC_INLINE_TIME.search(body):
+                raise ValueError("LRC 每行仅支持 [开始]歌词 或 [开始]歌词[结束]；请检查时间标签。")
+            if body:
+                start = float(match[1]) * 60 + float(match[2])
+                lines.append(Line(body, start=start, end=end))
+        elif not (raw.startswith("[") and raw.endswith("]")):
+            lines.append(Line(raw))
+    return lines
+
+
 def parse_lyrics(text: str, duration: float | None) -> list[Line]:
     text = text.lstrip("\ufeff").strip()
     if not text:
@@ -122,7 +148,7 @@ def parse_lyrics(text: str, duration: float | None) -> list[Line]:
         return lines
     first = text.splitlines()[0]
     metadata = re.match(r"^\[(?:ar|ti|al|by|offset|length):", first, re.I)
-    section = re.fullmatch(r"\[[A-Za-z\u3040-\u30ff\u3400-\u9fff][A-Za-z\u3040-\u30ff\u3400-\u9fff 0-9_-]*\]", first)
+    section = re.fullmatch(r"\[[A-Za-z\u3040-\u30ff\u3400-\u9fff\u1100-\u11ff\u3130-\u318f\uac00-\ud7af][A-Za-z\u3040-\u30ff\u3400-\u9fff\u1100-\u11ff\u3130-\u318f\uac00-\ud7af 0-9_-]*\]", first)
     if text.startswith('{') or (text.startswith('[') and not LRC.match(first) and not metadata and not section):
         try:
             rows = json.loads(text)
@@ -136,24 +162,13 @@ def parse_lyrics(text: str, duration: float | None) -> list[Line]:
         lines = [Line(**{k: v for k, v in row.items() if k in allowed}) for row in rows]
         validate_lines(lines, duration)
         return lines
-    lines = []
-    for raw in text.splitlines():
-        raw = raw.strip()
-        if not raw or re.match(r"^\[(?:ar|ti|al|by|offset|length):", raw, re.I):
-            continue
-        match = LRC.match(raw)
-        if match:
-            stamp = int(match[1]) * 60 + float(match[2])
-            if LRC.match(match[3]):
-                raise ValueError("请把多个 LRC 时间标签展开为独立歌词行，以保留每次副歌。")
-            if match[3].strip():
-                lines.append(Line(match[3].strip(), start=stamp))
-        elif not (raw.startswith("[") and raw.endswith("]")):
-            lines.append(Line(raw))
-    for i, line in enumerate(lines):
+    lines = parse_lrc(text)
+    next_start = duration
+    for line in reversed(lines):
         if line.start is not None:
-            line.end = next((x.start for x in lines[i + 1:] if x.start is not None),
-                            duration if duration is not None else line.start + 1)
+            if line.end is None:
+                line.end = next_start if next_start is not None else line.start + 1
+            next_start = line.start
     validate_lines(lines, duration)
     return lines
 

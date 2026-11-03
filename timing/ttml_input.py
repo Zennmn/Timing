@@ -46,11 +46,6 @@ def _role(node):
     return node.get(f'{{{TTM}}}role', '')
 
 
-def _language(value):
-    code = value.lower().replace('_', '-').split('-')[0]
-    return {'zh': 'zh', 'ja': 'ja', 'en': 'en'}.get(code, 'auto')
-
-
 def _text(node, namespace, *, skip_roles=False, preserve=False, trim=False):
     """Join XML mixed content; only collapse XML whitespace in default mode."""
     chunks = []
@@ -130,6 +125,48 @@ def _range(node, inherited=None):
     return begin, end
 
 
+def _background_range(node, inherited):
+    """Find a background line's range without treating annotations as vocals."""
+    ranges = []
+
+    def visit(current, bounds):
+        begin = parse_time(current.get('begin')) if 'begin' in current.attrib else bounds[0]
+        end = parse_time(current.get('end')) if 'end' in current.attrib else bounds[1]
+        if 'dur' in current.attrib:
+            duration_end = begin + parse_time(current.get('dur'))
+            end = min(end, duration_end) if 'end' in current.attrib else duration_end
+
+        def add_text(value):
+            # Untimed punctuation around timed words does not extend the singing.
+            if value and any(char.isalnum() for char in value):
+                if not 0 <= begin < end:
+                    raise ValueError('TTML 伴唱需要有效的开始和结束时间。')
+                ranges.append((begin, end))
+
+        add_text(current.text)
+        for child in current:
+            if not _role(child):
+                visit(child, (begin, end))
+            add_text(child.tail)
+
+    visit(node, inherited)
+    if not ranges:
+        return _range(node, inherited)
+    begin = parse_time(node.get('begin')) if 'begin' in node.attrib else min(item[0] for item in ranges)
+    duration_start = parse_time(node.get('begin')) if 'begin' in node.attrib else inherited[0]
+    if 'end' in node.attrib:
+        end = parse_time(node.get('end'))
+        if 'dur' in node.attrib:
+            end = min(end, duration_start + parse_time(node.get('dur')))
+    elif 'dur' in node.attrib:
+        end = duration_start + parse_time(node.get('dur'))
+    else:
+        end = max(item[1] for item in ranges)
+    if not 0 <= begin < end:
+        raise ValueError('TTML 伴唱需要有效的开始和结束时间。')
+    return begin, end
+
+
 def parse_ttml(text):
     if not isinstance(text, str) or len(text.encode('utf-8')) > MAX_BYTES:
         raise ValueError('歌词最大 2 MB。')
@@ -177,14 +214,14 @@ def parse_ttml(text):
         if valid_agent(value):
             agents[value] = value
 
-    def walk(node, language='', agent='', preserve=False, section=(None, None)):
-        language = node.get(f'{{{XML}}}lang', language)
+    def walk(node, agent='', preserve=False, section=(None, None)):
+        # xml:lang describes the source document, not the pronunciation route.
         agent = node.get(f'{{{TTM}}}agent', agent)
         preserve = {'preserve': True, 'default': False}.get(node.get(f'{{{XML}}}space'), preserve)
         if node.get('timeContainer', 'par') != 'par':
             raise ValueError('暂不支持 TTML seq 相对时间容器，请导出使用歌曲绝对时间的 TTML。')
         if node.tag == f'{namespace}p':
-            add_line(node, language, agent, preserve)
+            add_line(node, agent, preserve)
             begin, end = _range(node)
             if ((section[0] is not None and begin < section[0] - .001) or
                     (section[1] is not None and end > section[1] + .001)):
@@ -207,9 +244,9 @@ def parse_ttml(text):
             section = (max(left, section[0]) if left is not None and section[0] is not None else left,
                        min(right, section[1]) if right is not None and section[1] is not None else right)
         for child in node:
-            walk(child, language, agent, preserve, section)
+            walk(child, agent, preserve, section)
 
-    def add_line(node, language, agent, preserve):
+    def add_line(node, agent, preserve):
         if _role(node):
             raise ValueError('TTML 翻译和伴唱请使用歌词 p 内的 span 标记。')
         for child in node.iter():
@@ -229,7 +266,7 @@ def parse_ttml(text):
         if not text_value.strip() and not list(node):
             return  # Empty timed paragraphs are interlude markers, not lyrics.
         parent = len(lines)
-        main = Line(text_value, start, end, agent=agent_id(agent), language=_language(language), **notes)
+        main = Line(text_value, start, end, agent=agent_id(agent), language='auto', **notes)
         lines.append(main)
         key = node.get(f'{{{ITUNES}}}key')
         if key:
@@ -243,14 +280,14 @@ def parse_ttml(text):
                 raise ValueError('TTML 不支持嵌套多层伴唱，请拆成同级 x-bg。')
             bg_preserve = {'preserve': True, 'default': False}.get(background.get(f'{{{XML}}}space'), preserve)
             bg_text, bg_notes = _content(background, namespace, bg_preserve)
-            bg_start, bg_end = _range(background, (start, end))
+            bg_start, bg_end = _background_range(background, (start, end))
             lines.append(Line(bg_text, bg_start, bg_end, role='bg', parent=parent,
                               agent=agent_id(background.get(f'{{{TTM}}}agent', agent)),
-                              language=_language(background.get(f'{{{XML}}}lang', language)), **bg_notes))
+                              language='auto', **bg_notes))
             if key:
                 keyed_lines[key].append(len(lines) - 1)
 
-    walk(bodies[0], root.get(f'{{{XML}}}lang', ''), root.get(f'{{{TTM}}}agent', ''),
+    walk(bodies[0], root.get(f'{{{TTM}}}agent', ''),
          root.get(f'{{{XML}}}space') == 'preserve')
     _sidecars(root, namespace, lines, keyed_lines)
     return lines
@@ -263,9 +300,9 @@ def _sidecars(root, namespace, lines, keyed_lines):
         tracks = root.findall(f'{namespace}head/.//{{{ITUNES}}}{group}/{{{ITUNES}}}{track_name}')
         if not tracks:
             continue
-        # The application has one subtitle field; prefer a Chinese translation.
-        track = min(tracks, key=lambda item: 0 if field == 'translation' and
-                    _language(item.get(f'{{{XML}}}lang', '')) == 'zh' else 1)
+        # The application has one subtitle field; use XML document order.
+        # Track language labels are metadata and are not reliable selectors.
+        track = tracks[0]
         seen = set()
 
         def assign(index, text):
