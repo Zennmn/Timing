@@ -20,6 +20,22 @@ punctuation, contractions and case. Do not translate, normalize, repair spelling
 omit, repeat or add text. Silent punctuation attaches to a pronounced neighbor.
 Use parts:[] if no faithful reading can be established; do not omit the line.
 
+The available acoustic reading channels are ja, zh and en. A Latin-letter lyric
+is not necessarily English, and absence from an English dictionary is not a
+reason to discard it. For another language whose source pronunciation you can
+justify from the text and context, approximate that pronunciation with the
+closest symbols in english_phone_inventory and return lang en. Here en selects
+the acoustic phone inventory; it does not assert that the source language is
+English. Determine the source pronunciation FIRST, then map its sounds to the
+available phones. Do not apply English spelling rules to foreign orthography or
+translate it into an English word. Preserve its consonants, vowels and syllable
+structure as closely as the inventory permits; use no unsupported phone symbols.
+Map pronounceable syllables to exact original substrings where justified, keeping
+apostrophes, colons, hyphens and other spelling marks with their sound-bearing
+neighbor. Keep an uncertain fine boundary as a complete word with its full
+reading. This permission to approximate known sounds does not justify guessing
+an unknown source reading: return parts:[] when it cannot be established.
+
 Japanese reading is katakana with optional ー, using phonetic form: particles
 は→ワ, へ→エ and を→オ when appropriate, contextual kanji readings and numeral-
 counter readings, and phonetic long vowels where warranted. Decide the reading
