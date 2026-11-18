@@ -202,6 +202,52 @@ def _finish_run(api, job_id):
     return future.result(timeout=5)
 
 
+def test_cleanup_confirms_the_preview_and_refreshes_downloads(api):
+    old_id, active_id = 'a' * 32, 'b' * 32
+    artifacts = {
+        'source.mp3': b'original', 'stem.wav': b'upload', 'lyrics.txt': b'lyrics',
+        'lyrics.ttml': b'ttml', 'alignment.json': b'{}', 'bs_input.wav': b'decoded',
+        'lead_vocals.wav': b'lead', 'residual.wav': b'harmony', 'vocals.wav': b'vocals',
+    }
+    for job_id in (old_id, active_id):
+        folder = api.data / job_id
+        folder.mkdir()
+        (folder / 'job.json').write_text(json.dumps({
+            'id': job_id, 'state': 'complete', 'original_filename': 'song.mp3',
+            'result': {'source': 'separated_vocals', 'lead_separated': True},
+        }), encoding='utf-8')
+        for filename, content in artifacts.items():
+            (folder / filename).write_bytes(content)
+    server.jobs[active_id] = {'id': active_id, 'state': 'running'}
+    old_folder = api.data / old_id
+    old_record = (old_folder / 'job.json').read_bytes()
+    job_url = f'/api/jobs/{old_id}'
+    assert set(api.client.get(job_url).json()['available_files']) == {'ttml', 'report', 'lead', 'residual', 'vocals'}
+
+    preview = api.client.get('/api/cleanup?mode=all_audio').json()
+    assert (preview['jobs'], preview['files'], preview['bytes']) == (1, 4, 24)
+    params = {'mode': 'all_audio', 'token': preview['token']}
+    assert api.client.post('/api/cleanup', json=params).status_code == 403
+    (old_folder / 'singing.wav').write_bytes(b'new decode')
+    assert api.client.post('/api/cleanup', json=params, headers=headers()).status_code == 409
+    assert (old_folder / 'lead_vocals.wav').is_file()
+
+    preview = api.client.get('/api/cleanup?mode=all_audio').json()
+    params['token'] = preview['token']
+    cleaned = api.client.post('/api/cleanup', json=params, headers=headers())
+    assert cleaned.status_code == 200, cleaned.text
+    assert cleaned.json() == {'mode': 'all_audio', 'jobs': 1, 'files': 5, 'bytes': 34, 'failed': 0}
+    assert api.client.post('/api/cleanup', json=params, headers=headers()).status_code == 409
+    assert set(api.client.get(job_url).json()['available_files']) == {'ttml', 'report'}
+    assert api.client.get(job_url + '/files/lead').status_code == 404
+    assert api.client.get(job_url + '/files/ttml').content == b'ttml'
+    assert (old_folder / 'job.json').read_bytes() == old_record
+    for filename in ('source.mp3', 'stem.wav', 'lyrics.txt', 'lyrics.ttml', 'alignment.json'):
+        assert (old_folder / filename).read_bytes() == artifacts[filename]
+    for filename, content in artifacts.items():
+        assert (api.data / active_id / filename).read_bytes() == content
+
+
 def _filename_from_content_disposition(value):
     message = Message()
     message['content-disposition'] = value
@@ -463,7 +509,7 @@ def test_ttml_download_name_uses_original_stem_and_keeps_canonical_artifact(api)
 
 
 def test_llm_secret_is_held_by_queued_future_but_not_snapshots_or_api(api):
-    secret = 'queue-secret-not-for-disk-or-http'
+    secret = 'example-key-for-queue-test-1'
     sentinel = object()
     configs = []
 

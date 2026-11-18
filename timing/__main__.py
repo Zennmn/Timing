@@ -19,6 +19,7 @@ def main():
     parser.add_argument('--llm-model',help='接口的模型名；也可用 TIMING_LLM_MODEL')
     parser.add_argument('--llm-result',type=Path,help='网页 LLM 返回的 UTF-8 JSON，配合 --aligner llm_import，无需接口配置')
     parser.add_argument('--export-llm-prompt',type=Path,help='把完整提示词写入 TXT 后退出，只需 --lyrics，不需要音频或 Key')
+    parser.add_argument('--word-transliteration',action='store_true',default=False,help='为 LLM 路线请求并导出逐字音译；默认关闭，--export-llm-prompt 同样按此选项生成提示词')
     parser.add_argument('--llm-prompt-profile',choices=['fine','original'],default='fine',help='LLM 日语拆分：fine 细拆（默认）；original 适度合并（旧版）')
     parser.add_argument('--llm-api-key-header',help='API Key 请求头名称，默认 Authorization；也可用 TIMING_LLM_API_KEY_HEADER')
     parser.add_argument('--llm-api-key-format',choices=['auto','bearer','raw'],help='自动：Authorization 加 Bearer，其余原样；也可显式选 bearer/raw')
@@ -47,7 +48,8 @@ def main():
             if args.export_llm_prompt.resolve() in inputs:
                 parser.error('提示词输出不能覆盖输入文件。')
             prompt = export_prompt(args.lyrics.read_text(encoding='utf-8-sig'),args.audio.name if args.audio else '',
-                                   prompt_profile=args.llm_prompt_profile)
+                                   prompt_profile=args.llm_prompt_profile,
+                                   word_transliteration=args.word_transliteration)
             args.export_llm_prompt.write_text(prompt['prompt'],encoding='utf-8')
             print(f'提示词: {args.export_llm_prompt.resolve()}')
             return
@@ -77,10 +79,11 @@ def main():
             if args.llm_result.stat().st_size > MAX_RESULT_BYTES:
                 parser.error('网页 LLM 结果最大 16 MiB。')
             llm_result = args.llm_result.read_text(encoding='utf-8-sig')
-            import_response(lyrics, llm_result)
+            import_response(lyrics, llm_result, word_transliteration=args.word_transliteration)
         plan = plan_request(lyrics, language=args.language, aligner=args.aligner, audio_mode=args.audio_mode,
                             syllables=not args.word_level, english_splitter=args.english_splitter,
-                            trust_line_timestamps=args.trust_line_timestamps)
+                            trust_line_timestamps=args.trust_line_timestamps,
+                            word_transliteration=args.word_transliteration)
         llm_config = None
         if plan.needs_llm:
             import os
@@ -100,7 +103,7 @@ def main():
         extra['trust_line_timestamps'] = plan.trust_line_timestamps
         run(args.audio, lyrics, folder, args.language, plan.syllables, args.vocals,
                      audio_mode=plan.audio_mode, aligner=args.aligner, english_splitter=plan.english_splitter,
-                     llm_config=llm_config, **extra)
+                     llm_config=llm_config, word_transliteration=args.word_transliteration, **extra)
         shutil.copyfile(folder / "lyrics.ttml", output)
         print(f"TTML: {output.resolve()}")
         print(f"对齐记录: {(folder / 'alignment.json').resolve()}")

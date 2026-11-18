@@ -26,11 +26,13 @@ def native_tifa():
 
 
 def en(text,phones):
-    return {'text':text,'lang':'en','reading':phones.split()}
+    return {'text':text,'lang':'en','reading':phones.split(),'roman':text,'roman_lang':'en-Latn'}
 
 
 def ja(text,kana):
-    return {'text':text,'lang':'ja','reading':kana}
+    roman={'今日':'kyou','は':'wa','も':'mo','で':'de','を':'o','ツ':'tsu','シャ':'sha',
+           'T':'tii','2人':'futari','ニニン':'ninin'}.get(text,'romaji')
+    return {'text':text,'lang':'ja','reading':kana,'roman':roman,'roman_lang':'ja-Latn'}
 
 
 @pytest.mark.usefixtures('native_tifa')

@@ -212,6 +212,27 @@ def run_worker(folder, clips, log=print, pronunciations=None):
     return json.loads((folder / "raw.json").read_text(encoding="utf-8"))
 
 
+def detect_selected_language(raw):
+    """Summarize the ja/en pronunciation paths TIFA actually selected by audio score."""
+    languages = set()
+    for row in raw.get("results", []):
+        for candidate in row.get("selected", []):
+            if not isinstance(candidate, dict):
+                continue
+            for phoneme in candidate.get("phonemes", []):
+                if isinstance(phoneme, str):
+                    language = phoneme.split("/", 1)[0]
+                    if language in ("ja", "en"):
+                        languages.add(language)
+    if languages == {"ja"}:
+        return "ja"
+    if languages == {"en"}:
+        return "en"
+    if languages == {"ja", "en"}:
+        return "mixed"
+    return None
+
+
 def map_clip(line, row, clip, syllables, *, partial=False):
     return _map_clip(line,row,clip,syllables,partial=partial)
 
@@ -224,6 +245,20 @@ def _map_clip(line, row, clip, syllables, *, partial=False):
         map_result(probe,row,clip['start'],False,partial=partial)
         validate_clip(probe,line,clip)
     map_result(probe, row, clip["start"], syllables,partial=partial)
+    if 'llm_direct_parts' in clip:
+        from .llm_direct import spoken, target_parts
+        parts = target_parts(clip['llm_direct_parts'], clip['target_start'], clip['target_end'])
+        displays = [part['text'] for part in parts]
+        if (''.join(displays) != line.text or
+                [spoken(word.text) for word in probe.words] != [spoken(text) for text in displays]):
+            raise ValueError('LLM 分段与 TIFA 计时单元不一致。')
+        # PFML drops silent punctuation. Use the exact validated display boundaries
+        # from the LLM so opening brackets and English whitespace stay on their units.
+        for word, part in zip(probe.words, parts):
+            word.text = part['text']
+            word.spoken = kept(word.text)
+            word.roman = part.get('roman', '')
+            word.roman_lang = part.get('roman_lang', '')
     validate_clip(probe,line,clip)
     return probe, row
 
@@ -399,7 +434,7 @@ def complete_results(samples, rate, lines, folder, clips, raw, log=print, *, syl
 
 
 def align(samples, rate, lines, output_dir, coarse_rows, log=print, *, syllables=True, background=None,
-          pronunciations=None, trust_line_timestamps=False):
+          pronunciations=None, trust_line_timestamps=False, detect_language=False):
     if not ready():
         raise RuntimeError("TIFA 未配置完整，请运行 scripts/download_tifa.py。")
     manifest = json.loads((FOLDER/"manifest.json").read_text(encoding="utf-8"))
@@ -451,6 +486,11 @@ def align(samples, rate, lines, output_dir, coarse_rows, log=print, *, syllables
     raw=run_worker(folder,clips,log,pronunciations=pronunciations)
     checks=complete_results(samples,rate,lines,folder,clips,raw,log,syllables=syllables,background=background,
                             pronunciations=pronunciations)
-    return {"model":"TIFA-1.0-ST","runtime_revision":manifest["runtime_revision"],"frame_ms":10,
-            "seconds":raw["seconds"],"peak_torch_allocated_gib":raw["peak_torch_allocated_gib"],"checks":checks,
-            "note":"原生音素边界；10ms 网格不等于10ms准确度。英文音节映射为候选，连续长元音保留不可分组。"}
+    result = {"model":"TIFA-1.0-ST","runtime_revision":manifest["runtime_revision"],"frame_ms":10,
+              "seconds":raw["seconds"],"peak_torch_allocated_gib":raw["peak_torch_allocated_gib"],"checks":checks,
+              "note":"原生音素边界；10ms 网格不等于10ms准确度。英文音节映射为候选，连续长元音保留不可分组。"}
+    if detect_language:
+        selected_language = detect_selected_language(raw)
+        if selected_language:
+            result["detected_language"] = selected_language
+    return result

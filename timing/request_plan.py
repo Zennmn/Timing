@@ -22,11 +22,12 @@ class RequestPlan:
     needs_llm: bool
     has_background: bool
     trust_line_timestamps: bool = False
+    word_transliteration: bool = False
 
 
 def plan_request(lyrics, *, duration=None, language='mixed', aligner='auto',
                  audio_mode='lead', syllables=True, english_splitter='syllabify',
-                 trust_line_timestamps=False):
+                 trust_line_timestamps=False, word_transliteration=False):
     if language not in LANGUAGES:
         raise ValueError('不支持的语言选项。')
     if aligner not in ALIGNERS:
@@ -37,6 +38,10 @@ def plan_request(lyrics, *, duration=None, language='mixed', aligner='auto',
         raise ValueError('不支持的英语音节划分方案。')
     if not isinstance(trust_line_timestamps, bool):
         raise ValueError('信任逐句时间轴必须为布尔值。')
+    if not isinstance(word_transliteration, bool):
+        raise ValueError('输出逐字音译必须为布尔值。')
+    if word_transliteration and aligner not in ('llm_text', 'llm_direct', 'llm_import'):
+        raise ValueError('输出逐字音译仅适用于 LLM 文本读音、LLM 整曲识别和网页 LLM 导入。')
     if not isinstance(lyrics, str) or not lyrics.strip('\ufeff \t\r\n'):
         raise ValueError('请粘贴歌词，或导入 TXT、LRC、JSON、逐行 TTML 歌词文件。')
     if len(lyrics.encode('utf-8')) > MAX_LYRICS_BYTES:
@@ -77,4 +82,5 @@ def plan_request(lyrics, *, duration=None, language='mixed', aligner='auto',
         splitter = 'syllabify'
     needs_llm = aligner in ('llm_text', 'llm_direct') or (effective_syllables and splitter == 'llm')
     return RequestPlan(lines, aligner, audio_mode, effective_syllables, splitter,
-                       bool(needs_llm), any(line.role == 'bg' for line in lines), trust_line_timestamps)
+                       bool(needs_llm), any(line.role == 'bg' for line in lines),
+                       trust_line_timestamps, word_transliteration)

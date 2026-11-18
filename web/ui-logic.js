@@ -11,6 +11,8 @@
 //                 (zh is Mandarin)
 //   SPLITTERS     syllabify / pyphen / llm
 //   PROMPT_PROFILES fine / original (audio LLM prompt profiles)
+// Word transliteration is an opt-in output for the three LLM routes and is
+// independent of the lyrics binding (request_id / manifest).
 // and the audio-route naming mirrors timing/sources.py. Han text only counts
 // as Chinese when the local route's song or line language is zh / zh-en;
 // everywhere else Han keeps the historical Japanese reading. LLM routes do
@@ -23,7 +25,7 @@ const AUDIO_MODES = ['lead', 'vocals', 'source'];
 const LANGUAGES = ['mixed', 'ja', 'en', 'auto', 'zh', 'zh-en'];
 const REQUIRED_MODELS = ['ctc', 'tifa', 'bs_lead', 'separator'];
 const PROMPT_PROFILES = ['fine', 'original'];
-const EXPECTED_API_VERSION = 16;
+const EXPECTED_API_VERSION = 17;
 const MIN_API_VERSION = EXPECTED_API_VERSION;
 const AGENT_ID = /^v[1-9]\d{0,8}$/;
 
@@ -169,11 +171,13 @@ function resolveOptions(input) {
   const showSplitter = showEnglish && syllables;
   const llm = valid && (direct || textLlm || (syllables && splitter === 'llm'));
   const promptProfile = PROMPT_PROFILES.includes(input.promptProfile) ? input.promptProfile : 'fine';
+  const showWordTransliteration = directLike;
+  const wordTransliteration = showWordTransliteration && Boolean(input.wordTransliteration);
   const audioMode = AUDIO_MODES.includes(input.audioMode) ? input.audioMode : 'lead';
   const hasVocals = Boolean(input.hasVocals);
   const source = audioMode === 'lead' ? 'separated_vocals' : audioMode === 'vocals' ? (hasVocals ? 'provided_vocals' : 'separated_vocals') : (hasVocals ? 'provided_vocals' : 'original');
   const models = REQUIRED_MODELS.filter(name => name !== 'ctc' || !trustLineTimestamps);
-  return { aligner, engine, language, showLanguage: !directLike, valid, error, showEnglish, showSplitter, allowLlmSplitter, syllables, splitter, llm, sendsAudio: llm && direct, showImport, showPromptProfile: audioPromptMode, promptReady: showImport && valid, promptProfile, audioMode, source, trustEligible, trustLineTimestamps, models, hasBackground: Boolean(lyrics.hasBackground) };
+  return { aligner, engine, language, showLanguage: !directLike, valid, error, showEnglish, showSplitter, allowLlmSplitter, syllables, splitter, llm, sendsAudio: llm && direct, showImport, showPromptProfile: audioPromptMode, showWordTransliteration, wordTransliteration, promptReady: showImport && valid, promptProfile, audioMode, source, trustEligible, trustLineTimestamps, models, hasBackground: Boolean(lyrics.hasBackground) };
 }
 
 // Keep submission policy beside option resolution so every LLM route sends the
@@ -191,6 +195,9 @@ function submissionFields(plan) {
   if (['llm_direct', 'llm_import'].includes(plan.engine)) {
     fields.llm_prompt_profile = PROMPT_PROFILES.includes(plan.promptProfile) ? plan.promptProfile : 'fine';
   }
+  // Keep the backend default (false) on local routes; the checkbox is only
+  // visible and effective for the three LLM routes.
+  if (llmRoute) fields.word_transliteration = String(Boolean(plan.wordTransliteration));
   return fields;
 }
 

@@ -11,18 +11,19 @@ from .sources import prepare_sources
 def run(audio_path: Path, lyrics: str, out_dir: Path, language='mixed', syllables=True,
         vocals_path: Path | None = None, log=print, *, audio_mode='lead', aligner='auto',
         english_splitter='syllabify', llm_config=None, llm_result=None,
-        llm_prompt_profile='fine', trust_line_timestamps=False):
+        llm_prompt_profile='fine', trust_line_timestamps=False, word_transliteration=False):
     # Reject invalid/dormant settings before touching audio, models or a provider.
     options = dict(language=language, aligner=aligner, audio_mode=audio_mode, syllables=syllables,
-                   english_splitter=english_splitter, trust_line_timestamps=trust_line_timestamps)
+                   english_splitter=english_splitter, trust_line_timestamps=trust_line_timestamps,
+                   word_transliteration=word_transliteration)
     plan_request(lyrics, **options)
     if aligner == 'llm_direct':
         from .llm_direct import read_prompt
-        read_prompt(llm_prompt_profile)
+        read_prompt(llm_prompt_profile, word_transliteration=word_transliteration)
     imported = None
     if aligner == 'llm_import':
         from .llm_import import import_response
-        imported = import_response(lyrics, llm_result)
+        imported = import_response(lyrics, llm_result, word_transliteration=word_transliteration)
     audio_path, out_dir = Path(audio_path), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     log('解码音频…')
@@ -38,6 +39,7 @@ def run(audio_path: Path, lyrics: str, out_dir: Path, language='mixed', syllable
               'audio_mode': plan.audio_mode, 'separation': tracks.separation,
               'lead_separation': tracks.lead_separation, 'aligner': plan.aligner,
               'trust_line_timestamps': plan.trust_line_timestamps,
+              'word_transliteration': plan.word_transliteration,
               'timestamp_grid_ms': None, 'warnings': [], 'lines': [],
               'background_source': ('provided_vocals' if vocals_path else 'full_vocals')
                                    if plan.has_background and plan.audio_mode != 'source'

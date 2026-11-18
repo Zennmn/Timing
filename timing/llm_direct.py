@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 import re
+import unicodedata
 import sys
 import xml.etree.ElementTree as ET
 
@@ -26,13 +27,26 @@ PROMPT_PROFILES = ('fine', 'original')
 MAX_AUDIO_BASE64_BYTES = 64 * 1024**2
 WHOLE_SONG_TIMEOUT = 600
 MAX_RESPONSE_BYTES = 16 * 1024**2
+ROMAN_LANG_RE = re.compile(r'[a-z]{2,3}-Latn(?:-[a-z0-9]{2,8})*', re.I | re.ASCII)
 
 
-def read_prompt(profile='fine'):
+def render_prompt(template, *, word_transliteration):
+    keys = 'text, lang, and reading'
+    example, rules = '', ''
+    if word_transliteration:
+        keys = 'text, lang, reading, roman, and roman_lang'
+        example = ',"roman":"...","roman_lang":"ja-Latn"'
+        rules = PROMPT.with_name('llm_transliteration.txt').read_text(encoding='utf-8').rstrip() + '\n\n'
+    return (template.replace('{{part_keys}}', keys)
+            .replace('{{roman_example}}', example)
+            .replace('{{roman_rules}}\n\n', rules))
+
+
+def read_prompt(profile='fine', *, word_transliteration=False):
     if profile not in PROMPT_PROFILES:
         raise ValueError('日语拆分请选择 fine（细拆）或 original（适度合并，旧版）。')
     path = PROMPT if profile == 'fine' else PROMPT.with_name('llm_direct_original.txt')
-    return path.read_text(encoding='utf-8')
+    return render_prompt(path.read_text(encoding='utf-8'), word_transliteration=word_transliteration)
 
 
 def whole_audio(samples, rate):
@@ -82,7 +96,41 @@ def detected_language(parts):
             frozenset(['zh','en']):'zh-en', frozenset(['ja','en']):'mixed'}.get(languages,'auto')
 
 
-def compile_parts(text, parts, language='ja'):
+def compile_roman(surface, roman, tag):
+    if (not isinstance(tag, str) or not ROMAN_LANG_RE.fullmatch(tag)
+            or not isinstance(roman, str) or not roman.strip()):
+        raise ValueError('每个 LLM 分段需要非空 roman 和有效的拉丁音译语言标签，如 ja-Latn。')
+    language, _, *rest = tag.split('-')
+    tag = '-'.join([language.lower(), 'Latn', *(p.upper() if len(p) == 2 else p.lower() for p in rest)])
+    if language.lower() == 'en':
+        if roman != surface:
+            raise ValueError('英语音译必须逐字符复制原分段，包括大小写、标点和空白。')
+        return roman, tag
+
+    # Remove display punctuation without joining readings separated by it.
+    # Apostrophes and hyphens can be part of the transliteration itself.
+    letters, boundary, latin = [], False, False
+    for ch in roman:
+        kind = unicodedata.category(ch)[0]
+        if kind in ('P', 'S') and ch not in "'’-":
+            boundary = bool(letters) and not letters[-1].isspace()
+            continue
+        if ch.isalpha() and ch not in 'ʻʼ':
+            if not unicodedata.name(ch, '').startswith('LATIN '):
+                raise ValueError('非英语音译需要使用拉丁字母。')
+            latin = True
+        if kind == 'C' and ch not in '\t\r\n':
+            raise ValueError('音译包含不可用的控制字符。')
+        if boundary and not ch.isspace():
+            letters.append(' ')
+        boundary = False
+        letters.append(ch)
+    if not latin:
+        raise ValueError('非英语音译需要使用拉丁字母。')
+    return ''.join(letters), tag
+
+
+def compile_parts(text, parts, language='ja', *, require_roman=False, ignore_roman=False):
     if not isinstance(parts, list) or len(parts)>min(256,len(text)):
         raise ValueError('parts 必须为有界分段数组。')
     if not parts:
@@ -91,8 +139,14 @@ def compile_parts(text, parts, language='ja'):
                  else ('zh','en') if chinese.is_chinese(language) else ('ja','en'))
     compiled = []
     for part in parts:
-        if not isinstance(part, dict) or set(part)!={'text','lang','reading'}:
-            raise ValueError('分段仅允许 text/lang/reading；禁止时间或额外字段。')
+        required={'text','lang','reading'}
+        optional={'roman','roman_lang'}
+        if (not isinstance(part, dict) or not required.issubset(part) or
+                not set(part).issubset(required|optional) or
+                (require_roman and not optional.issubset(part)) or
+                (not ignore_roman and (('roman' in part) != ('roman_lang' in part)))):
+            fields = 'text/lang/reading/roman/roman_lang' if require_roman else 'text/lang/reading'
+            raise ValueError(f'分段字段不符合 {fields} 格式，禁止时间或其他字段。')
         surface, lang, reading = part['text'], part['lang'], part['reading']
         if (not isinstance(surface,str) or not surface or
                 not any(c.isalnum() for c in spoken(surface)) or lang not in languages):
@@ -125,12 +179,21 @@ def compile_parts(text, parts, language='ja'):
             phones = [p for g in groups for p in g['phones']]
         if not phones or any(f'{lang}/{p}' not in phone_inventory() for p in phones):
             raise ValueError('读音包含本地声学模型不支持的音素，或只有静音。')
-        compiled.append({'text':surface,'lang':lang,'reading':reading,'groups':groups})
+        compiled_part={'text':surface,'lang':lang,'reading':reading,'groups':groups}
+        if 'roman' in part and not ignore_roman:
+            roman, roman_lang = compile_roman(surface, part['roman'], part['roman_lang'])
+            compiled_part.update(roman=roman,roman_lang=roman_lang)
+        compiled.append(compiled_part)
     if ''.join(p['text'] for p in compiled)!=text:
         raise ValueError('分段拼接必须与原歌词完全相同，不可增删或改写字符。')
     if sum(len(g['phones']) for p in compiled for g in p['groups'])>1024:
         raise ValueError('本句音素过多，请拆分逐句范围。')
     return compiled
+
+
+def compile_llm_parts(text, parts, *, word_transliteration):
+    return compile_parts(text, parts, 'auto', require_roman=word_transliteration,
+                         ignore_roman=not word_transliteration)
 
 
 def write_pfml(audio, parts):
@@ -157,8 +220,9 @@ def target_parts(parts, start, end):
 
 
 class DirectSession:
-    def __init__(self, config, log, output, *, prompt_profile='fine'):
-        self.prompt=read_prompt(prompt_profile)
+    def __init__(self, config, log, output, *, prompt_profile='fine', word_transliteration=False):
+        self.word_transliteration=word_transliteration
+        self.prompt=read_prompt(prompt_profile, word_transliteration=word_transliteration)
         self.prompt_profile=prompt_profile
         self.transport=LlmSession(config,log)
         self.log, self.output=log,Path(output)
@@ -172,6 +236,7 @@ class DirectSession:
     def report(self):
         return {'mode':'llm_direct','model':self.transport.config.model,
                 'prompt_profile':self.prompt_profile,
+                'word_transliteration':self.word_transliteration,
                 'requests':self.transport.requests,'repair_requests':self.transport.repair_requests,
                 'thinking':self.transport.report()['thinking'],
                 'prompt_sha256':hashlib.sha256(self.prompt.encode()).hexdigest(),
@@ -204,9 +269,13 @@ class DirectSession:
                     record['reason']=self.error+' 需人工处理。'
                 return
             self.audio_range = bounds
-            items=[{'id':record['id'],'text':line.text,'start':line.start,'end':line.end,
-                    'role':line.role,'agent':line.agent,'parent':line.parent}
-                   for record,line in zip(self.records,lines)]
+            items=[]
+            for record,line in zip(self.records,lines):
+                item={'id':record['id'],'text':line.text,'start':line.start,'end':line.end,
+                      'role':line.role,'agent':line.agent,'parent':line.parent}
+                if isinstance(line.roman,str) and line.roman:
+                    item['roman_reference']=line.roman
+                items.append(item)
             english=sorted(p.split('/',1)[1] for p in phone_inventory() if p.startswith('en/'))
             payload={'audio_range':bounds,'audio_source':self.audio_source,
                      'english_phone_inventory':english,'items':items}
@@ -230,7 +299,8 @@ class DirectSession:
                 try:
                     if len(matches)!=1 or set(matches[0])!={'id','parts'}:
                         raise ValueError('每行需要且只允许一个 id/parts 对象。')
-                    parts=compile_parts(line.text,matches[0]['parts'],'auto')
+                    parts=compile_llm_parts(line.text, matches[0]['parts'],
+                                            word_transliteration=self.word_transliteration)
                 except (ValueError,KeyError,IndexError,TypeError) as exc:
                     record['reason']=str(exc)+' 未自动补发，需人工处理。'
                     continue

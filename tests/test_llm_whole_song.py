@@ -26,11 +26,13 @@ def reply(items):
 
 
 def answer(key, reading=None):
-    return {'id':key,'parts':[{'text':'hi','lang':'en','reading':reading or ['hh','ay']}]}
+    return {'id':key,'parts':[{'text':'hi','lang':'en','reading':reading or ['hh','ay'],
+                               'roman':'hi','roman_lang':'en-Latn'}]}
 
 
-def session_for(tmp_path, handler):
-    session = direct.DirectSession(LlmConfig('https://fixture.example/v1','audio-fixture'), lambda _:None, tmp_path)
+def session_for(tmp_path, handler, **options):
+    session = direct.DirectSession(LlmConfig('https://fixture.example/v1','audio-fixture'),
+                                   lambda _:None, tmp_path, **options)
     session.transport.client.close()
     session.transport.client = httpx.Client(transport=httpx.MockTransport(handler))
     return session
@@ -74,6 +76,36 @@ def test_repeated_text_can_have_different_readings_in_the_same_response(tmp_path
     assert session.records[0]['parts'][0]['groups'][0]['phones']==['hh','ay']
     assert session.records[1]['parts'][0]['groups'][0]['phones']==['ay']
     assert session.transport.requests==1
+
+
+def test_line_roman_is_a_nonbinding_audio_reference_and_unit_roman_is_retained(
+        tmp_path, inventory):
+    seen=[]
+    def handler(request):
+        payload,_,_=decode_request(request)
+        seen.append(payload['items'][0])
+        return reply([answer('line_001')])
+    line=Line('hi',1,2,roman='legacy hai')
+    session=session_for(tmp_path,handler,word_transliteration=True)
+    session.prepare([line],np.zeros(3*16000),16000)
+
+    assert seen[0]['roman_reference']=='legacy hai'
+    part=session.records[0]['parts'][0]
+    assert (part['roman'],part['roman_lang'])==('hi','en-Latn')
+    assert line.roman=='legacy hai'
+
+
+@pytest.mark.parametrize('missing',['roman','roman_lang'])
+def test_audio_response_rejects_a_part_without_required_roman(
+        tmp_path,inventory,missing):
+    bad=answer('line_001')
+    bad['parts'][0].pop(missing)
+    session=session_for(tmp_path,lambda _:reply([bad]),word_transliteration=True)
+    session.prepare([Line('hi',0,1)],np.zeros(16000),16000)
+
+    record=session.records[0]
+    assert record['status']=='manual' and 'roman' in record['reason']
+    assert session.transport.requests==1 and session.transport.repair_requests==0
 
 
 def test_background_lyrics_use_one_full_vocals_track_and_keep_voice_relationships(tmp_path,inventory):

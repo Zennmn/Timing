@@ -11,13 +11,14 @@ ET.register_namespace("ttm", TTM)
 ET.register_namespace("itunes", ITUNES)
 
 
-def stamp(seconds):
+def stamp(seconds, *, minute_clock=False):
     if not math.isfinite(seconds) or seconds < 0:
         raise ValueError("时间戳必须是非负有限值。")
-    ms = round(seconds * 1000)
-    hours, ms = divmod(ms, 3600000)
-    minutes, ms = divmod(ms, 60000)
+    minutes, ms = divmod(round(seconds * 1000), 60000)
     sec, ms = divmod(ms, 1000)
+    if minute_clock:
+        return f"{minutes}:{sec:02}.{ms:03}"
+    hours, minutes = divmod(minutes, 60)
     return f"{hours:02}:{minutes:02}:{sec:02}.{ms:03}"
 
 
@@ -72,50 +73,89 @@ def check(lines, duration):
                 raise ValueError(f"第 {i + 1} 行单位超出部分对齐范围。")
 
 
-def export(lines, duration, language="ja", title=""):
+def export(lines, duration, language="ja", title="", *,
+           include_line_languages=True, include_word_transliteration=True):
     check(lines, duration)
-    export_language = ('zh-CN' if language in ('zh', 'zh-en')
-                       else 'en' if language == 'en' else 'mul' if language == 'auto' else 'ja')
-    root = ET.Element(f"{{{TT}}}tt", {f"{{{XML}}}lang": export_language})
+    mains = sorted(((i, line) for i, line in enumerate(lines) if line.role == "main"), key=lambda pair: bounds(pair[1])[0])
+    backgrounds_by_main = {idx: [b for b in lines if b.role == "bg" and b.parent == idx]
+                           for idx, _ in mains}
+
+    units = [word for idx, main in mains
+             for line in [main, *backgrounds_by_main[idx]] for word in line.words]
+    # A track covers every exported unit, including background vocals.
+    transliteration_ready = (include_word_transliteration and bool(units)
+                             and all(w.roman and w.roman_lang for w in units))
+
+    def xml_time(seconds):
+        return stamp(seconds, minute_clock=transliteration_ready)
+
+    if include_line_languages:
+        export_language = ('zh-CN' if language in ('zh', 'zh-en')
+                           else 'en' if language == 'en' else 'mul' if language == 'auto' else 'ja')
+    else:
+        # LLM and automatic routes provide one song-level language. Keep
+        # multilingual (mul) distinct from undetermined (und).
+        export_language = {'zh': 'zh-CN', 'ja': 'ja', 'en': 'en', 'zh-en': 'mul',
+                           'mixed': 'mul', 'auto': 'und'}.get(language, 'und')
+    root = ET.Element(f"{{{TT}}}tt", {f"{{{XML}}}lang": export_language,
+                                     f"{{{ITUNES}}}timing": "Word"})
     head = ET.SubElement(root, f"{{{TT}}}head")
     metadata = ET.SubElement(head, f"{{{TT}}}metadata")
     if title:
         ET.SubElement(metadata, f"{{{TTM}}}title").text = title
     for agent in sorted({line.agent for line in lines}):
         ET.SubElement(metadata, f"{{{TTM}}}agent", {f"{{{XML}}}id": agent, "type": "person"})
-    div = ET.SubElement(ET.SubElement(root, f"{{{TT}}}body", {"dur": stamp(duration)}), f"{{{TT}}}div")
 
-    def timed_words(parent, line):
+    track = None
+    if transliteration_ready:
+        languages = {word.roman_lang for word in units}
+        track_language = next(iter(languages)) if len(languages) == 1 else 'mul-Latn'
+        # Keep Apple's extension subtree in its required default namespace.
+        apple = ET.SubElement(metadata, "iTunesMetadata", {"xmlns": ITUNES})
+        tracks = ET.SubElement(apple, "transliterations")
+        track = ET.SubElement(tracks, "transliteration", {f"{{{XML}}}lang": track_language})
+    div = ET.SubElement(ET.SubElement(root, f"{{{TT}}}body", {"dur": xml_time(duration)}), f"{{{TT}}}div")
+
+    def timed_words(parent, line, roman_parent):
         for index,w in enumerate(line.words):
             start,end = export_times(line,index)
-            attrs = {"begin": stamp(start), "end": stamp(end)}
+            attrs = {"begin": xml_time(start), "end": xml_time(end)}
             ET.SubElement(parent, f"{{{TT}}}span", attrs).text = w.text
+            if roman_parent is not None:
+                ET.SubElement(roman_parent, "span", attrs).text = w.roman
         if line.translation:
             ET.SubElement(parent, f"{{{TT}}}span", {f"{{{TTM}}}role": "x-translation", f"{{{XML}}}lang": "zh-CN"}).text = line.translation
-        if line.roman:
+        if line.roman and not transliteration_ready:
             effective_language = line.language if line.language != 'auto' else language
             roman_language = ('zh-Latn' if effective_language in ('zh','zh-en')
                               else 'en' if effective_language == 'en' else 'ja-Latn')
             ET.SubElement(parent, f"{{{TT}}}span", {f"{{{TTM}}}role": "x-roman", f"{{{XML}}}lang": roman_language}).text = line.roman
 
-    mains = sorted(((i, line) for i, line in enumerate(lines) if line.role == "main"), key=lambda pair: bounds(pair[1])[0])
     for seq, (idx, line) in enumerate(mains, 1):
-        backgrounds = [b for b in lines if b.role == "bg" and b.parent == idx]
+        backgrounds = backgrounds_by_main[idx]
         group = [line] + backgrounds
         begin = min(bounds(x)[0] for x in group)
         end = max(bounds(x)[1] for x in group)
-        p = ET.SubElement(div, f"{{{TT}}}p", {"begin": stamp(begin), "end": stamp(end), f"{{{TTM}}}agent": line.agent, f"{{{ITUNES}}}key": f"L{seq}"})
-        if line.language in ('zh', 'zh-en'):
-            p.set(f'{{{XML}}}lang', 'zh-CN')
-        elif line.language in ('ja','en'):
-            p.set(f'{{{XML}}}lang', line.language)
-        for bg in [x for x in backgrounds if bounds(x)[0] < bounds(line)[0]]:
-            el = ET.SubElement(p, f"{{{TT}}}span", {f"{{{TTM}}}role": "x-bg", "begin": stamp(bounds(bg)[0]), "end": stamp(bounds(bg)[1])})
-            timed_words(el, bg)
-        timed_words(p, line)
-        for bg in [x for x in backgrounds if bounds(x)[0] >= bounds(line)[0]]:
-            el = ET.SubElement(p, f"{{{TT}}}span", {f"{{{TTM}}}role": "x-bg", "begin": stamp(bounds(bg)[0]), "end": stamp(bounds(bg)[1])})
-            timed_words(el, bg)
+        key = f"L{seq}"
+        p = ET.SubElement(div, f"{{{TT}}}p", {"begin": xml_time(begin), "end": xml_time(end), f"{{{TTM}}}agent": line.agent, f"{{{ITUNES}}}key": key})
+        if include_line_languages:
+            if line.language in ('zh', 'zh-en'):
+                p.set(f'{{{XML}}}lang', 'zh-CN')
+            elif line.language in ('ja','en'):
+                p.set(f'{{{XML}}}lang', line.language)
+        roman_text = ET.SubElement(track, "text", {"for": key}) if track is not None else None
+        before = [bg for bg in backgrounds if bounds(bg)[0] < bounds(line)[0]]
+        after = [bg for bg in backgrounds if bounds(bg)[0] >= bounds(line)[0]]
+        for voice in [*before, line, *after]:
+            parent, roman_parent = p, roman_text
+            if voice is not line:
+                start, end = bounds(voice)
+                attrs = {f"{{{TTM}}}role": "x-bg", "begin": xml_time(start), "end": xml_time(end)}
+                parent = ET.SubElement(p, f"{{{TT}}}span", attrs)
+                if roman_text is not None:
+                    roman_parent = ET.SubElement(roman_text, "span", attrs)
+            timed_words(parent, voice, roman_parent)
     # Lyric paragraphs are mixed content. Pretty-print indentation would add
     # whitespace between timed spans, changing their rendered display text.
-    return ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    # A character reference preserves any literal CR through XML newline normalization.
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True).replace(b"\r", b"&#13;")

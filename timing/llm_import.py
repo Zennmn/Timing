@@ -3,7 +3,7 @@ import hashlib
 import json
 import re
 
-from .llm_direct import compile_parts, phone_inventory, read_prompt
+from .llm_direct import compile_llm_parts, phone_inventory, read_prompt
 from .request_plan import plan_request
 from .ttml_input import is_ttml
 from .text import parse_lrc
@@ -19,17 +19,21 @@ def manifest(lyrics):
     except ValueError:
         is_json = False
     known_final_end = is_json or is_ttml(lyrics) or parse_lrc(lyrics)[-1].end is not None
-    items = [{'id':f'line_{i+1:03}', 'text':line.text, 'start':round(float(line.start),6),
+    items=[]
+    for i,line in enumerate(lines):
+        item={'id':f'line_{i+1:03}', 'text':line.text, 'start':round(float(line.start),6),
               'end':round(float(line.end),6) if known_final_end or i < len(lines)-1 else None,
               'role':line.role, 'agent':line.agent, 'parent':line.parent}
-             for i, line in enumerate(lines)]
+        if isinstance(line.roman,str) and line.roman:
+            item['roman_reference']=line.roman
+        items.append(item)
     identity = json.dumps(items, ensure_ascii=False, sort_keys=True, separators=(',',':'))
     key = 'timing-llm-v1:' + hashlib.sha256(identity.encode('utf-8')).hexdigest()
     return key, items
 
 
-def export_prompt(lyrics, audio_name='', *, prompt_profile='fine'):
-    template = read_prompt(prompt_profile)
+def export_prompt(lyrics, audio_name='', *, prompt_profile='fine', word_transliteration=False):
+    template = read_prompt(prompt_profile, word_transliteration=word_transliteration)
     key, items = manifest(lyrics)
     try:
         english = sorted(p.split('/',1)[1] for p in phone_inventory() if p.startswith('en/'))
@@ -48,7 +52,7 @@ def export_prompt(lyrics, audio_name='', *, prompt_profile='fine'):
     return {'prompt':prompt, 'request_id':key, 'lines':len(items)}
 
 
-def import_response(lyrics, response):
+def import_response(lyrics, response, *, word_transliteration=False):
     if not isinstance(response, str) or not response.strip():
         raise ValueError('请粘贴网页 LLM 返回的 JSON，或导入结果文件。')
     if len(response.encode('utf-8')) > MAX_RESULT_BYTES:
@@ -80,7 +84,8 @@ def import_response(lyrics, response):
     records = []
     for index, item in enumerate(items):
         try:
-            parts = compile_parts(item['text'], rows[item['id']]['parts'], 'auto')
+            parts = compile_llm_parts(item['text'], rows[item['id']]['parts'],
+                                      word_transliteration=word_transliteration)
         except OSError:
             raise ValueError('本地读音到音素转换资源缺失，请先运行 setup.ps1。') from None
         except (ValueError, TypeError, KeyError, IndexError) as exc:
@@ -92,7 +97,7 @@ def import_response(lyrics, response):
             record['reason'] = '网页 LLM 未确定本句读音与拆分，仅保留整句时间，需手工补轴。'
         records.append(record)
     return {'mode':'llm_import', 'request_id':key, 'requests':0, 'repair_requests':0,
-            'language_hints_sent':False,
+            'language_hints_sent':False, 'word_transliteration':word_transliteration,
             'response_sha256':hashlib.sha256(response.encode('utf-8')).hexdigest(),
             'lines':records, 'note':'语言、分段和读音来自手动导入；应用未调用 LLM，具体时间由本地模型计算。'}
 

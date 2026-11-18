@@ -16,6 +16,7 @@ from uuid import uuid4
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.concurrency import run_in_threadpool
 
@@ -31,12 +32,14 @@ from .job_store import save_job, load_job
 from .request_plan import plan_request, MAX_LYRICS_BYTES, LANGUAGES
 from .llm_import import export_prompt, import_response, validation_summary, MAX_RESULT_BYTES
 from .llm_direct import read_prompt
+from . import cleanup
 
 app = FastAPI(title="Timing", docs_url=None, redoc_url=None)
 app.mount('/static', StaticFiles(directory=ROOT / 'web'), name='static')
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "[::1]", "testserver"])
 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="timing-gpu")
 lock = threading.RLock()
+cleanup_lock = threading.Lock()
 jobs = {}
 futures = {}
 queue_sequence = itertools.count(1)
@@ -44,6 +47,20 @@ MAX_QUEUE_JOBS = 50
 ACTIVE_STATES = {'uploading', 'queued', 'running'}
 TOKEN = secrets.token_urlsafe(32)
 ALLOWED = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".opus", ".aac", ".wma", ".mp4", ".aiff"}
+DOWNLOADS = {
+    'ttml': ('lyrics.ttml', 'application/ttml+xml'),
+    'report': ('alignment.json', 'application/json'),
+    'draft': ('draft.lrc', 'text/plain'),
+    'vocals': ('vocals.wav', 'audio/wav'),
+    'lead': ('lead_vocals.wav', 'audio/wav'),
+    'backing': ('backing_vocals.wav', 'audio/wav'),
+    'residual': ('residual.wav', 'audio/wav'),
+}
+
+
+class CleanupRequest(BaseModel):
+    mode: str
+    token: str
 
 
 @app.middleware("http")
@@ -80,6 +97,7 @@ def status():
         waiting = sum(j['state'] == 'queued' for j in jobs.values())
         running = sum(j['state'] == 'running' for j in jobs.values())
     return {'app': 'Timing', 'version': __version__, 'api_version': API_VERSION,
+            'task_file_cleanup': True,
             'languages': list(LANGUAGES),
             'english_splitters': ['syllabify', 'pyphen', 'llm'], 'models': models,
             'required_models': list(models), 'japanese_dictionary': japanese_dictionary,
@@ -131,7 +149,7 @@ def persist(job_id):
             logging.getLogger(__name__).warning('Job-state save unavailable for %s; continuing in memory', job_id)
 
 
-def process(job_id, audio_path, lyrics, language, syllables, vocals_path, audio_mode='lead', aligner="auto", english_splitter="syllabify", llm_config=None, llm_result=None, llm_prompt_profile='fine', trust_line_timestamps=False):
+def process(job_id, audio_path, lyrics, language, syllables, vocals_path, audio_mode='lead', aligner="auto", english_splitter="syllabify", llm_config=None, llm_result=None, llm_prompt_profile='fine', trust_line_timestamps=False, *, word_transliteration=False):
     def log(message):
         with lock:
             jobs[job_id]["log"] = (jobs[job_id]["log"] + [message])[-150:]
@@ -146,6 +164,7 @@ def process(job_id, audio_path, lyrics, language, syllables, vocals_path, audio_
         if aligner == 'llm_direct':
             extra['llm_prompt_profile'] = llm_prompt_profile
         extra['trust_line_timestamps'] = trust_line_timestamps
+        extra['word_transliteration'] = word_transliteration
         result = run(audio_path, lyrics, DATA / job_id, language, syllables, vocals_path, log, audio_mode=audio_mode, aligner=aligner, english_splitter=english_splitter, llm_config=llm_config, **extra)
         with lock:
             jobs[job_id].update({"state": result["status"], "result": result})
@@ -184,7 +203,7 @@ async def submit(request: Request, audio: UploadFile = File(...), lyrics: str = 
                  llm_reasoning_effort: str = Form(''),
                  llm_api_key_header: str = Form('Authorization'), llm_api_key_format: str = Form('auto'),
                  llm_result_file: UploadFile | None = File(None), llm_prompt_profile: str = Form('fine'),
-                 trust_line_timestamps: bool = Form(False)):
+                 trust_line_timestamps: bool = Form(False), word_transliteration: bool = Form(False)):
     initialize()
     form = await request.form()
     if any(key in form for key in ('separate', 'lead')):
@@ -203,16 +222,17 @@ async def submit(request: Request, audio: UploadFile = File(...), lyrics: str = 
     try:
         plan = plan_request(lyrics, language=language, aligner=aligner, audio_mode=audio_mode,
                             syllables=syllables, english_splitter=english_splitter,
-                            trust_line_timestamps=trust_line_timestamps)
+                            trust_line_timestamps=trust_line_timestamps, word_transliteration=word_transliteration)
         if plan.aligner == 'llm_direct':
-            read_prompt(llm_prompt_profile)
+            read_prompt(llm_prompt_profile, word_transliteration=plan.word_transliteration)
     except (ValueError, TypeError) as exc:
         raise HTTPException(400, str(exc)) from None
     llm_result = None
     if plan.aligner == 'llm_import':
         llm_result = await read_llm_result(llm_result_file)
         try:
-            await run_in_threadpool(import_response, lyrics, llm_result)
+            await run_in_threadpool(import_response, lyrics, llm_result,
+                                    word_transliteration=plan.word_transliteration)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
     llm_config = None
@@ -234,7 +254,8 @@ async def submit(request: Request, audio: UploadFile = File(...), lyrics: str = 
                         'audio_mode':plan.audio_mode, 'aligner':plan.aligner,
                         'language':language, 'syllables':plan.syllables,
                         'llm_prompt_profile':llm_prompt_profile,
-                        'trust_line_timestamps':plan.trust_line_timestamps}
+                        'trust_line_timestamps':plan.trust_line_timestamps,
+                        'word_transliteration':plan.word_transliteration}
         jobs[job_id]['download_name'] = ttml_filename(jobs[job_id])
     folder = DATA / job_id
     try:
@@ -255,13 +276,14 @@ async def submit(request: Request, audio: UploadFile = File(...), lyrics: str = 
         extra = [llm_result] if plan.aligner == 'llm_import' else [None,llm_prompt_profile] if plan.aligner == 'llm_direct' else []
         if plan.trust_line_timestamps:
             extra = [llm_result, llm_prompt_profile if plan.aligner == 'llm_direct' else 'fine', True]
+        output_options = {'word_transliteration': True} if plan.word_transliteration else {}
         with lock:
             jobs[job_id]["state"] = "queued"
             jobs[job_id]['queue_order'] = next(queue_sequence)
             persist(job_id)
             futures[job_id] = executor.submit(process, job_id, audio_path, lyrics, language, plan.syllables, vocals_path,
                                              plan.audio_mode, plan.aligner, plan.english_splitter, llm_config,
-                                             *extra)
+                                             *extra, **output_options)
             return {'id': job_id, 'name': jobs[job_id]['name'], 'download_name': jobs[job_id]['download_name']}
     except Exception:
         with lock:
@@ -331,6 +353,36 @@ def cancel_job(job_id: str):
         return job_view(jobs[job_id])
 
 
+def cleanup_active_ids():
+    with lock:
+        return set(futures) | {job_id for job_id, job in jobs.items() if job['state'] in ACTIVE_STATES}
+
+
+@app.get('/api/cleanup')
+def preview_cleanup(mode: str = 'work'):
+    if mode not in cleanup.CLEANUP_MODES:
+        raise HTTPException(400, '请选择有效的清理范围。')
+    try:
+        with cleanup_lock:
+            result = cleanup.preview(DATA, mode, active_ids=cleanup_active_ids())
+    except OSError:
+        raise HTTPException(503, '暂时无法读取任务文件，请稍后重试。') from None
+    return JSONResponse(result, headers={'Cache-Control': 'no-store'})
+
+
+@app.post('/api/cleanup')
+def clean_finished_jobs(request: CleanupRequest):
+    if request.mode not in cleanup.CLEANUP_MODES:
+        raise HTTPException(400, '请选择有效的清理范围。')
+    try:
+        with cleanup_lock:
+            return cleanup.clean(DATA, request.mode, active_ids=cleanup_active_ids(), expected_token=request.token)
+    except cleanup.CleanupChanged:
+        raise HTTPException(409, '可清理的文件已变化，请重新预览后确认。') from None
+    except OSError:
+        raise HTTPException(503, '暂时无法清理任务文件，请稍后重试。') from None
+
+
 async def read_llm_result(upload):
     if upload is None:
         raise HTTPException(400, '请粘贴或导入网页 LLM 返回的 JSON。')
@@ -344,9 +396,11 @@ async def read_llm_result(upload):
 
 
 @app.post('/api/llm/prompt')
-async def llm_prompt(lyrics: str = Form(''), audio_name: str = Form(''), llm_prompt_profile: str = Form('fine')):
+async def llm_prompt(lyrics: str = Form(''), audio_name: str = Form(''), llm_prompt_profile: str = Form('fine'),
+                     word_transliteration: bool = Form(False)):
     try:
-        return await run_in_threadpool(export_prompt, lyrics, audio_name, prompt_profile=llm_prompt_profile)
+        return await run_in_threadpool(export_prompt, lyrics, audio_name, prompt_profile=llm_prompt_profile,
+                                       word_transliteration=word_transliteration)
     except (ValueError, TypeError) as exc:
         raise HTTPException(400,str(exc)) from None
 
@@ -361,10 +415,11 @@ async def import_ttml(lyrics: str = Form('')):
 
 
 @app.post('/api/llm/import/validate')
-async def validate_llm_import(lyrics: str = Form(''), llm_result_file: UploadFile | None = File(None)):
+async def validate_llm_import(lyrics: str = Form(''), llm_result_file: UploadFile | None = File(None),
+                              word_transliteration: bool = Form(False)):
     result = await read_llm_result(llm_result_file)
     try:
-        audit = await run_in_threadpool(import_response, lyrics, result)
+        audit = await run_in_threadpool(import_response, lyrics, result, word_transliteration=word_transliteration)
         return validation_summary(audit)
     except (ValueError, TypeError) as exc:
         raise HTTPException(400,str(exc)) from None
@@ -398,27 +453,35 @@ async def llm_test(llm_base_url: str = Form(''), llm_model: str = Form(''),
     return await run_in_threadpool(probe)
 
 
+def download_error(job, kind):
+    state = job['state']
+    if (kind not in DOWNLOADS or (kind in ('ttml', 'report') and state != 'complete')
+            or (kind == 'draft' and state != 'draft')):
+        return '文件尚未生成。'
+    result = job.get('result') or {}
+    if kind == 'vocals' and (state not in ('complete', 'draft') or
+                             result.get('source') not in ('provided_vocals', 'separated_vocals')):
+        return '该任务没有可下载的人声轨。'
+    if kind in ('lead', 'backing', 'residual') and (state not in ('complete', 'draft') or
+                                                  not result.get('lead_separated')):
+        return '该任务没有主唱／和声分轨。'
+    if not (DATA / job['id'] / DOWNLOADS[kind][0]).is_file():
+        return '文件不存在。'
+    return None
+
+
 @app.get("/api/jobs/{job_id}")
 def job_status(job_id: str):
-    return get_job(job_id)
+    job = get_job(job_id)
+    job['available_files'] = [kind for kind in DOWNLOADS if download_error(job, kind) is None]
+    return job
 
 
 @app.get("/api/jobs/{job_id}/files/{kind}")
 def download(job_id: str, kind: str):
     job = get_job(job_id)
-    allowed = {"ttml": "lyrics.ttml", "report": "alignment.json", "draft": "draft.lrc", "vocals": "vocals.wav",
-               "lead": "lead_vocals.wav", "backing": "backing_vocals.wav", "residual": "residual.wav"}
-    if kind not in allowed or (kind in ("ttml", "report") and job["state"] != "complete") or (kind == "draft" and job["state"] != "draft"):
-        raise HTTPException(404, "文件尚未生成。")
-    if kind == "vocals" and (job["state"] not in ("complete", "draft") or
-                              job.get("result", {}).get("source") not in ("provided_vocals", "separated_vocals")):
-        raise HTTPException(404, "该任务没有可下载的人声轨。")
-    if kind in ("lead", "backing", "residual") and (job["state"] not in ("complete", "draft") or
-                                         not job.get("result", {}).get("lead_separated")):
-        raise HTTPException(404, "该任务没有主唱／和声分轨。")
-    path = DATA / job_id / allowed[kind]
-    if not path.exists():
-        raise HTTPException(404, "文件不存在。")
-    media = {"ttml": "application/ttml+xml", "report": "application/json", "draft": "text/plain", "vocals": "audio/wav",
-             "lead": "audio/wav", "backing": "audio/wav", "residual": "audio/wav"}[kind]
-    return FileResponse(path, filename=job['download_name'] if kind == 'ttml' else allowed[kind], media_type=media)
+    if error := download_error(job, kind):
+        raise HTTPException(404, error)
+    filename, media = DOWNLOADS[kind]
+    return FileResponse(DATA / job_id / filename,
+                        filename=job['download_name'] if kind == 'ttml' else filename, media_type=media)

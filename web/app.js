@@ -3,7 +3,7 @@
 'use strict';
 const token = (document.querySelector('meta[name="timing-token"]') || {}).content || '';
 const $ = id => document.getElementById(id);
-const storage = { get(key) { try { return localStorage.getItem('timing-' + key); } catch { return null; } }, set(key, value) { try { localStorage.setItem('timing-' + key, String(value)); } catch {} }, remove(key) { try { localStorage.removeItem('timing-' + key); } catch {} } };
+const storage = { get(key) { try { return localStorage.getItem('timing-' + key); } catch { return null; } }, set(key, value) { try { localStorage.setItem('timing-' + key, String(value)); return true; } catch { return false; } }, remove(key) { try { localStorage.removeItem('timing-' + key); return true; } catch { return false; } } };
 const show = (id, visible) => { $(id).classList.toggle('hidden', !visible); };
 const ICON_EYE = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiM0ZTU5NjciIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMTcuOTQgMTcuOTRBMTAuMDcgMTAuMDcgMCAwIDEgMTIgMjBjLTcgMC0xMS04LTExLThhMTguNDUgMTguNDUgMCAwIDEgNS4wNi01Ljk0TTkuOSA0LjI0QTkuMTIgOS4xMiAwIDAgMSAxMiA0YzcgMCAxMSA4IDExIDhhMTguNSAxOC41IDAgMCAxLTIuMTYgMy4xOW0tNi43Mi0xLjA3YTMgMyAwIDEgMS00LjI0LTQuMjQiLz48bGluZSB4MT0iMSIgeTE9IjEiIHgyPSIyMyIgeTI9IjIzIi8+PC9zdmc+';
 const ICON_EYE_OFF = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiM0ZTU5NjciIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMSAxMnM0LTggMTEtOCAxMSA4IDExIDgtNCA4LTExIDgtMTEtOC0xMS04eiIvPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTIiIHI9IjMiLz48L3N2Zz4=';
@@ -14,6 +14,9 @@ const cancellingJobs = new Set();
 const logDisclosureStates = new Map();
 let renderedLogJobId = '';
 const ACTIVE_JOB_STATES = new Set(['uploading', 'queued', 'running']);
+let cleanupOpen = false, cleanupBusy = false, cleanupPreview = null, cleanupSequence = 0, cleanupResult = '', cleanupWarning = false;
+const CLEANUP_MODE_IDS = { work: 'cleanup-mode-work', keep_vocals: 'cleanup-mode-keep-vocals', all_audio: 'cleanup-mode-all-audio' };
+const CLEANUP_MODE_LABELS = { work: '只清理中间文件', keep_vocals: '同时清理伴奏及和声', all_audio: '清理全部生成音轨' };
 let importSequence = 0, ttmlTimer = null, ttmlConverting = false;
 const MAX_LLM_RESULT_BYTES = 16 * 1024 ** 2;
 let promptText = '', promptRequestId = '', promptLines = 0, promptBusy = false, promptMessage = '', promptWarning = false;
@@ -21,7 +24,35 @@ let checkBusy = false, checkMessage = '', checkWarning = false, resultImporting 
 let lyricsRevision = 0, resultRevision = 0, promptSequence = 0, checkSequence = 0, resultFileSequence = 0;
 const persisted = ['llm-base-url', 'llm-model', 'llm-api-key-header', 'llm-api-key-format', 'llm-thinking-mode', 'llm-thinking-format', 'llm-reasoning-effort'];
 for (const name of persisted) { const value = storage.get(name); if (value !== null && ($(name).tagName !== 'SELECT' || [...$(name).options].some(option => option.value === value))) $(name).value = value; }
-for (const name of ['syllables', 'llm-json-mode']) { const saved = storage.get(name); if (saved !== null) $(name).checked = saved === 'true'; }
+const API_KEY_STORAGE = 'llm-api-key';
+const API_KEY_REMEMBER_STORAGE = 'llm-api-key-remember';
+function setApiKeyMemoryStatus(message, warning = false) {
+  $('key-hint').textContent = message;
+  $('key-hint').classList.toggle('warning', warning);
+}
+function persistRememberedApiKey() {
+  if (!$('remember-api-key').checked) { setApiKeyMemoryStatus('未记住 API Key；当前输入只在本页面使用。'); return false; }
+  if (!$('llm-api-key').value) {
+    const removed = storage.remove(API_KEY_STORAGE);
+    setApiKeyMemoryStatus(removed ? '已清除此浏览器保存的 API Key；当前输入为空。' : '此浏览器拒绝更新本地存储，未能确认保存的 API Key 已清除。', !removed);
+    return removed;
+  }
+  const saved = storage.set(API_KEY_STORAGE, $('llm-api-key').value);
+  setApiKeyMemoryStatus(saved ? 'API Key 已保存在此浏览器，刷新页面可恢复；不会写入任务文件。' : '当前浏览器拒绝本地存储，API Key 未保存，只会用于本次页面。', !saved);
+  return saved;
+}
+$('remember-api-key').checked = storage.get(API_KEY_REMEMBER_STORAGE) !== 'false';
+if ($('remember-api-key').checked) {
+  const savedApiKey = storage.get(API_KEY_STORAGE);
+  if (savedApiKey) {
+    $('llm-api-key').value = savedApiKey;
+    setApiKeyMemoryStatus('已从此浏览器恢复 API Key；再次输入会更新保存值。');
+  } else setApiKeyMemoryStatus('输入 API Key 后会保存在此浏览器，刷新页面可恢复；不会写入任务文件。');
+} else {
+  const removed = storage.remove(API_KEY_STORAGE);
+  setApiKeyMemoryStatus(removed ? '未记住 API Key；当前输入只在本页面使用。' : '未记住 API Key；此浏览器拒绝更新本地存储，无法确认旧保存值已清除。', !removed);
+}
+for (const name of ['syllables', 'llm-json-mode', 'word-transliteration']) { const saved = storage.get(name); if (saved !== null) $(name).checked = saved === 'true'; }
 let preferredSplitter = storage.get('english-splitter') || 'syllabify';
 if (!['syllabify', 'pyphen', 'llm'].includes(preferredSplitter)) preferredSplitter = 'syllabify';
 let preferredPromptProfile = storage.get('llm-prompt-profile') || 'fine';
@@ -75,7 +106,7 @@ function renderImportPanel() {
   $('llm-result-status').textContent = checkMessage || (!result ? '把返回的 JSON 粘贴到上方，或导入 .json 文件。提交时以当前文本为准。' : '当前文本会随提交上传；可以先用“检查结果”核对歌词绑定和完整度。');
   $('llm-result-status').classList.toggle('warning', checkWarning);
 }
-function readState() { const hasVocals = Boolean($('vocals').files.length); const language = $('language').value, aligner = $('aligner').value, llmRoute = ['llm_text', 'llm_direct', 'llm_import'].includes(aligner); parsed = analyzeLyrics($('lyrics').value, llmRoute ? 'auto' : language, llmRoute); return resolveOptions({ lyrics: parsed, language, aligner, syllables: $('syllables').checked, splitter: preferredSplitter, promptProfile: $('llm-prompt-profile').value, hasVocals, audioMode: $('audio-mode').value, trustLineTimestamps }); }
+function readState() { const hasVocals = Boolean($('vocals').files.length); const language = $('language').value, aligner = $('aligner').value, llmRoute = ['llm_text', 'llm_direct', 'llm_import'].includes(aligner); parsed = analyzeLyrics($('lyrics').value, llmRoute ? 'auto' : language, llmRoute); return resolveOptions({ lyrics: parsed, language, aligner, syllables: $('syllables').checked, splitter: preferredSplitter, promptProfile: $('llm-prompt-profile').value, wordTransliteration: $('word-transliteration').checked, hasVocals, audioMode: $('audio-mode').value, trustLineTimestamps }); }
 function updateUI() {
   current = readState();
   const audio = $('audio').files[0], vocals = $('vocals').files[0];
@@ -86,6 +117,12 @@ function updateUI() {
   $('trust-line-timestamps').disabled = busy || !current.trustEligible;
   show('language-settings', current.showLanguage);
   show('prompt-profile-settings', current.showPromptProfile); $('llm-prompt-profile').disabled = !current.showPromptProfile;
+  show('word-transliteration-settings', current.showWordTransliteration); $('word-transliteration').disabled = !current.showWordTransliteration;
+  $('word-transliteration-hint').textContent = current.wordTransliteration
+    ? '主唱和和声的音译覆盖完整时，才会写入 TTML 的逐字音译轨道。'
+    : current.engine === 'llm_import'
+      ? '关闭时保留已有的逐行音译，旧结果仍可导入。'
+      : '关闭时仍保留歌词已有的逐行音译。';
   show('english-settings', current.showEnglish); $('syllables').disabled = !current.showEnglish;
   show('splitter-settings', current.showSplitter); $('english-splitter').disabled = !current.showSplitter;
   $('english-splitter').querySelector('option[value="llm"]').disabled = !current.allowLlmSplitter; $('english-splitter').value = current.splitter;
@@ -163,9 +200,13 @@ function renderService() {
   $('model-status').textContent = serviceError || (!service ? '正在检查本地服务…' : missing.length ? '缺少 ' + missing.map(name => modelNames[name] || name).join('、') + '。请运行 setup.ps1 安装全部 4 个模型，完成后点“重新检查”。' : dictionaryMissing ? '日语词典未就绪，请运行 setup.ps1 安装 UniDic 2025.12，完成后点“重新检查”。' : '本地模型已就绪' + (service.version ? ' · v' + service.version : '') + (service.queued > 0 ? ' · ' + service.queued + ' 个任务处理中' : ''));
   $('model-status').classList.toggle('warning', Boolean(serviceError || missing.length || dictionaryMissing));
   show('retry-models', Boolean(serviceError || missing.length || dictionaryMissing));
+  const cleanupAvailable = Boolean(service?.task_file_cleanup);
+  if (!cleanupAvailable) { cleanupOpen = false; show('cleanup-panel', false); }
+  show('cleanup-tools', cleanupAvailable);
   const importMissing = current.showImport && (!llmResultText() || llmResultText().length > MAX_LLM_RESULT_BYTES);
   $('submit').disabled = busy || importing || ttmlConverting || (current.showImport && resultImporting) || !service || Boolean(serviceError) || missing.length > 0 || dictionaryMissing || !current.valid || !$('audio').files.length || Boolean(fileError || audioError) || importMissing || queueFull;
   $('submit').title = queueFull ? '队列已满，请等当前歌曲完成后再提交。' : '';
+  renderCleanup();
 }
 async function checkModels() {
   serviceError = ''; service = null; renderService();
@@ -198,14 +239,14 @@ async function responseData(response, fallback) { try { return await response.js
 async function generatePrompt() {
   updateUI();
   if ($('generate-prompt').disabled) return;
-  const sequence = ++promptSequence, revision = lyricsRevision, profile = current.promptProfile, lyrics = $('lyrics').value, audio = $('audio').files[0];
+  const sequence = ++promptSequence, revision = lyricsRevision, profile = current.promptProfile, word = current.wordTransliteration, lyrics = $('lyrics').value, audio = $('audio').files[0];
   ++checkSequence; checkBusy = false; promptBusy = true; promptText = ''; promptRequestId = ''; promptLines = 0;
   promptMessage = '正在生成本地提示词…'; promptWarning = false; checkMessage = ''; checkWarning = false; renderImportPanel();
-  const data = new FormData(); data.set('lyrics', lyrics); data.set('llm_prompt_profile', profile); if (audio) data.set('audio_name', audio.name);
+  const data = new FormData(); data.set('lyrics', lyrics); data.set('llm_prompt_profile', profile); data.set('word_transliteration', String(word)); if (audio) data.set('audio_name', audio.name);
   try {
     const response = await fetch('/api/llm/prompt', { method: 'POST', headers: { 'X-Timing-Token': token }, body: data });
     const result = await responseData(response, '无法生成提示词');
-    if (sequence !== promptSequence || revision !== lyricsRevision || profile !== $('llm-prompt-profile').value) return;
+    if (sequence !== promptSequence || revision !== lyricsRevision || profile !== $('llm-prompt-profile').value || word !== $('word-transliteration').checked) return;
     if (!response.ok) throw new Error(messageFrom(result, '无法生成提示词'));
     if (typeof result.prompt !== 'string' || !result.prompt.trim()) throw new Error('服务没有返回提示词，请检查本机版本后重试。');
     promptText = result.prompt; promptRequestId = typeof result.request_id === 'string' ? result.request_id : '';
@@ -213,7 +254,7 @@ async function generatePrompt() {
     promptMessage = '提示词已生成' + (promptLines ? ' · ' + promptLines + ' 行' : '') + '。请与当前完整音频一起发送给网页 LLM。'; promptWarning = false;
     checkMessage = '提示词已就绪；粘贴或导入返回 JSON 后可以检查。'; checkWarning = false;
   } catch (error) {
-    if (sequence === promptSequence && revision === lyricsRevision && profile === $('llm-prompt-profile').value) { promptMessage = error.message || '无法生成提示词。'; promptWarning = true; }
+    if (sequence === promptSequence && revision === lyricsRevision && profile === $('llm-prompt-profile').value && word === $('word-transliteration').checked) { promptMessage = error.message || '无法生成提示词。'; promptWarning = true; }
   } finally {
     if (sequence === promptSequence) { promptBusy = false; renderImportPanel(); }
   }
@@ -239,19 +280,19 @@ function downloadPrompt() {
 async function checkImportResult() {
   updateUI();
   if ($('validate-llm-result').disabled) return;
-  const sequence = ++checkSequence, revision = lyricsRevision, resultRevisionAtStart = resultRevision, text = $('llm-result').value;
+  const sequence = ++checkSequence, revision = lyricsRevision, resultRevisionAtStart = resultRevision, word = current.wordTransliteration, text = $('llm-result').value;
   checkBusy = true; checkMessage = '正在核对结果与当前歌词的绑定…'; checkWarning = false; renderImportPanel();
-  const data = new FormData(); data.set('lyrics', $('lyrics').value); data.set('llm_result_file', new Blob([text], { type: 'application/json' }), 'llm-result.json');
+  const data = new FormData(); data.set('lyrics', $('lyrics').value); data.set('word_transliteration', String(word)); data.set('llm_result_file', new Blob([text], { type: 'application/json' }), 'llm-result.json');
   try {
     const response = await fetch('/api/llm/import/validate', { method: 'POST', headers: { 'X-Timing-Token': token }, body: data });
     const result = await responseData(response, '无法检查导入结果');
-    if (sequence !== checkSequence || revision !== lyricsRevision || resultRevisionAtStart !== resultRevision) return;
+    if (sequence !== checkSequence || revision !== lyricsRevision || resultRevisionAtStart !== resultRevision || word !== $('word-transliteration').checked) return;
     if (!response.ok || result.ok !== true) throw new Error(messageFrom(result, '导入结果未通过检查。'));
     const accepted = Array.isArray(result.accepted) ? result.accepted.length : Number(result.accepted) || 0;
     const manual = Array.isArray(result.manual_lines) ? result.manual_lines.length : Number(result.manual_lines) || 0;
     checkMessage = '检查通过 · ' + (Number(result.lines) || 0) + ' 行 · 可用 ' + accepted + ' 行' + (manual ? ' · 待手工 ' + manual + ' 行' : '') + '。'; checkWarning = manual > 0;
   } catch (error) {
-    if (sequence === checkSequence && revision === lyricsRevision && resultRevisionAtStart === resultRevision) { checkMessage = error.message || '导入结果未通过检查。'; checkWarning = true; }
+    if (sequence === checkSequence && revision === lyricsRevision && resultRevisionAtStart === resultRevision && word === $('word-transliteration').checked) { checkMessage = error.message || '导入结果未通过检查。'; checkWarning = true; }
   } finally {
     if (sequence === checkSequence) { checkBusy = false; renderImportPanel(); }
   }
@@ -280,6 +321,125 @@ function jobStateText(job) {
 function isActiveJob(job) { return ACTIVE_JOB_STATES.has(job?.state); }
 function queueActiveCount() { return queueJobs.filter(isActiveJob).length; }
 function jobLogText(value) { return Array.isArray(value) ? value.join('\n') : typeof value === 'string' ? value : ''; }
+function formatCleanupSize(bytes) {
+  const value = Math.max(0, Number(bytes) || 0);
+  if (value >= 1024 ** 3) return (value / 1024 ** 3).toFixed(2) + ' GB';
+  if (value >= 1024 ** 2) return (value / 1024 ** 2).toFixed(1) + ' MB';
+  if (value >= 1024) return Math.round(value / 1024) + ' KB';
+  return value + ' B';
+}
+function selectedCleanupMode() {
+  return Object.keys(CLEANUP_MODE_IDS).find(mode => $(CLEANUP_MODE_IDS[mode]).checked) || 'work';
+}
+function jobAvailableFiles(job) {
+  return Array.isArray(job?.available_files) ? new Set(job.available_files.map(String)) : null;
+}
+function hasJobFile(available, kind) { return available === null || available.has(kind); }
+function renderCleanup() {
+  show('cleanup-tools', Boolean(service?.task_file_cleanup));
+  show('cleanup-panel', cleanupOpen);
+  $('open-cleanup').setAttribute('aria-expanded', String(cleanupOpen));
+  $('open-cleanup').textContent = cleanupOpen ? '收起清理设置' : '清理任务文件';
+  $('open-cleanup').disabled = cleanupBusy;
+  $('close-cleanup').disabled = cleanupBusy;
+  $('refresh-cleanup').disabled = cleanupBusy;
+  for (const mode of Object.keys(CLEANUP_MODE_IDS)) $(CLEANUP_MODE_IDS[mode]).disabled = cleanupBusy;
+  $('cleanup-ack').disabled = cleanupBusy || !cleanupPreview || !cleanupPreview.files;
+  $('confirm-cleanup').disabled = cleanupBusy || !cleanupPreview || !cleanupPreview.files || !$('cleanup-ack').checked;
+  if (cleanupBusy && !cleanupPreview) {
+    $('cleanup-preview').textContent = '正在检查已结束任务中的文件…';
+  } else if (!cleanupPreview) {
+    $('cleanup-preview').textContent = '选择范围后，可先查看将删除的文件数量和预计释放空间。';
+  } else if (!cleanupPreview.files) {
+    $('cleanup-preview').textContent = '当前范围内没有可清理的文件。';
+  } else {
+    $('cleanup-preview').textContent = '将按“' + CLEANUP_MODE_LABELS[cleanupPreview.mode] + '”清理 ' + cleanupPreview.jobs + ' 个已结束任务中的 ' + cleanupPreview.files +
+      ' 个文件，预计释放约 ' + formatCleanupSize(cleanupPreview.bytes) + '。';
+  }
+  $('cleanup-result').textContent = cleanupResult;
+  $('cleanup-result').classList.toggle('warning', cleanupWarning);
+}
+function setCleanupOpen(open) {
+  if (cleanupBusy || !service?.task_file_cleanup) return;
+  cleanupOpen = Boolean(open);
+  cleanupPreview = null;
+  cleanupResult = ''; cleanupWarning = false;
+  $('cleanup-ack').checked = false;
+  ++cleanupSequence;
+  renderCleanup();
+  if (cleanupOpen) previewCleanup();
+}
+async function previewCleanup({ preserveMessage = false } = {}) {
+  if (!cleanupOpen || cleanupBusy || !service?.task_file_cleanup) return;
+  const mode = selectedCleanupMode();
+  if (!CLEANUP_MODE_IDS[mode]) return;
+  const sequence = ++cleanupSequence;
+  cleanupBusy = true;
+  cleanupPreview = null;
+  $('cleanup-ack').checked = false;
+  if (!preserveMessage) { cleanupResult = ''; cleanupWarning = false; }
+  renderCleanup();
+  try {
+    const response = await fetch('/api/cleanup?mode=' + encodeURIComponent(mode), { cache: 'no-store' });
+    const result = await responseData(response, '无法估算可清理文件');
+    if (!response.ok) throw new Error(messageFrom(result, '无法估算可清理文件'));
+    if (sequence !== cleanupSequence || !cleanupOpen || selectedCleanupMode() !== mode) return;
+    if (result.mode !== mode || !result.token || !Number.isInteger(result.jobs) ||
+        !Number.isInteger(result.files) || !Number.isInteger(result.bytes) || result.jobs < 0 || result.files < 0 || result.bytes < 0) {
+      throw new Error('清理预览返回格式不正确，请重启本地服务后重试。');
+    }
+    cleanupPreview = { mode, token: String(result.token), jobs: result.jobs, files: result.files, bytes: result.bytes };
+  } catch (error) {
+    if (sequence === cleanupSequence) {
+      cleanupPreview = null;
+      cleanupResult = error.message || '无法估算可清理文件。';
+      cleanupWarning = true;
+    }
+  } finally {
+    if (sequence === cleanupSequence) { cleanupBusy = false; renderCleanup(); }
+  }
+}
+async function runCleanup() {
+  if (cleanupBusy || !cleanupPreview || !cleanupPreview.files || !$('cleanup-ack').checked) return;
+  const snapshot = cleanupPreview;
+  cleanupBusy = true;
+  cleanupResult = '正在永久清理，请不要关闭页面…'; cleanupWarning = false;
+  renderCleanup();
+  try {
+    const response = await fetch('/api/cleanup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Timing-Token': token },
+      body: JSON.stringify({ mode: snapshot.mode, token: snapshot.token }),
+    });
+    const result = await responseData(response, '清理任务文件失败');
+    if (response.status === 409) {
+      cleanupBusy = false; cleanupPreview = null; $('cleanup-ack').checked = false;
+      cleanupResult = '预览后任务文件发生变化，已重新检查。请确认新的范围后再次清理。';
+      cleanupWarning = true; renderCleanup();
+      await previewCleanup({ preserveMessage: true });
+      return;
+    }
+    if (!response.ok) throw new Error(messageFrom(result, '清理任务文件失败'));
+    if (!Number.isInteger(result.files) || !Number.isInteger(result.bytes) || result.files < 0 || result.bytes < 0) {
+      throw new Error('清理结果格式不正确，请刷新页面核对。');
+    }
+    const failed = Number.isInteger(result.failed) ? result.failed : 0;
+    cleanupResult = '已清理 ' + (Number.isInteger(result.jobs) ? result.jobs : 0) + ' 个任务中的 ' + result.files +
+      ' 个文件，释放约 ' + formatCleanupSize(result.bytes) + '。';
+    if (failed) cleanupResult += ' 另有 ' + failed + ' 项未能清理，可重新估算后重试。';
+    cleanupWarning = failed > 0;
+    cleanupPreview = null; $('cleanup-ack').checked = false;
+    cleanupBusy = false;
+    selectedJobDetail = null;
+    renderCleanup(); renderSelectedJob();
+    await refreshQueue();
+    await previewCleanup({ preserveMessage: true });
+  } catch (error) {
+    cleanupResult = error.message || '清理任务文件失败。'; cleanupWarning = true;
+  } finally {
+    cleanupBusy = false; renderCleanup();
+  }
+}
 function renderQueue() {
   const list = $('queue-list');
   list.replaceChildren();
@@ -326,6 +486,7 @@ function renderSelectedJob() {
   if (!summary) { renderedLogJobId = ''; show('progress', false); return; }
   const job = selectedJobDetail?.id === selectedJobId ? selectedJobDetail : summary;
   const result = job.result || summary.result || {};
+  const availableFiles = jobAvailableFiles(job);
   show('progress', true);
   $('state').textContent = jobStateText(job);
   $('job-info').textContent = jobName(job) + ' · ' + selectedJobId.slice(0, 8);
@@ -361,9 +522,10 @@ function renderSelectedJob() {
     $('result-message').textContent = job.state === 'running' ? '正在使用本地模型处理；可以继续添加下一首。' : '正在导入音频和设置。';
   }
   if (result.lead_separated) {
-    appendDownload($('links'), '下载主唱 WAV', '/api/jobs/' + selectedJobId + '/files/lead');
-    appendDownload($('links'), result.residual_includes_accompaniment ? '下载伴奏及和声 WAV' : '下载和声／剩余人声 WAV', '/api/jobs/' + selectedJobId + '/files/' + (result.residual_includes_accompaniment ? 'residual' : 'backing'));
-  } else if (['separated_vocals', 'provided_vocals'].includes(result.source)) {
+    if (hasJobFile(availableFiles, 'lead')) appendDownload($('links'), '下载主唱 WAV', '/api/jobs/' + selectedJobId + '/files/lead');
+    const backingKind = result.residual_includes_accompaniment ? 'residual' : 'backing';
+    if (hasJobFile(availableFiles, backingKind)) appendDownload($('links'), result.residual_includes_accompaniment ? '下载伴奏及和声 WAV' : '下载和声／剩余人声 WAV', '/api/jobs/' + selectedJobId + '/files/' + backingKind);
+  } else if (['separated_vocals', 'provided_vocals'].includes(result.source) && hasJobFile(availableFiles, 'vocals')) {
     appendDownload($('links'), '下载对齐用人声 WAV', '/api/jobs/' + selectedJobId + '/files/vocals');
   }
 }
@@ -582,9 +744,43 @@ $('llm-prompt-profile').addEventListener('change', () => {
   checkWarning = true;
   updateUI();
 });
+$('word-transliteration').addEventListener('change', () => {
+  const word = $('word-transliteration').checked;
+  storage.set('word-transliteration', word);
+  const hasResult = Boolean(llmResultText());
+  ++promptSequence; ++checkSequence; promptBusy = false; checkBusy = false;
+  promptText = ''; promptRequestId = ''; promptLines = 0;
+  promptMessage = '逐字音译设置已更改；请重新生成提示词。'; promptWarning = true;
+  checkMessage = hasResult
+    ? '逐字音译设置已更改；已保留当前结果文本，可重新生成提示词后按需再检查。'
+    : '逐字音译设置已更改；请重新生成提示词。';
+  checkWarning = true;
+  updateUI();
+});
 $('english-splitter').addEventListener('change', () => { preferredSplitter = $('english-splitter').value; storage.set('english-splitter', preferredSplitter); updateUI(); });
 for (const name of ['syllables', 'llm-json-mode']) $(name).addEventListener('change', () => { storage.set(name, $(name).checked); updateUI(); });
 for (const name of persisted) for (const event of ['input', 'change']) $(name).addEventListener(event, () => { storage.set(name, $(name).value); updateThinking(); });
+for (const event of ['input', 'change']) $('llm-api-key').addEventListener(event, persistRememberedApiKey);
+$('remember-api-key').addEventListener('change', () => {
+  const remembered = $('remember-api-key').checked;
+  const preferenceSaved = storage.set(API_KEY_REMEMBER_STORAGE, remembered);
+  if (!remembered) {
+    const removed = storage.remove(API_KEY_STORAGE);
+    setApiKeyMemoryStatus(preferenceSaved && removed ? 'API Key 不再记住；已移除此浏览器保存值，当前输入仍保留。' : '当前输入仍保留，但此浏览器拒绝更新存储，无法确认保存值已移除。', !preferenceSaved || !removed);
+    return;
+  }
+  if (!$('llm-api-key').value) {
+    setApiKeyMemoryStatus(preferenceSaved ? '已开启记住 API Key；输入后会保存在此浏览器。' : '当前浏览器拒绝本地存储，无法记住之后输入的 API Key。', !preferenceSaved);
+    return;
+  }
+  const keySaved = storage.set(API_KEY_STORAGE, $('llm-api-key').value);
+  setApiKeyMemoryStatus(preferenceSaved && keySaved ? 'API Key 已保存在此浏览器，刷新页面可恢复。' : '当前浏览器拒绝本地存储，API Key 未保存，只会用于本次页面。', !preferenceSaved || !keySaved);
+});
+$('clear-api-key').addEventListener('click', () => {
+  $('llm-api-key').value = '';
+  const removed = storage.remove(API_KEY_STORAGE);
+  setApiKeyMemoryStatus(removed ? '已清除当前输入和此浏览器保存的 API Key。' : '当前输入已清空，但此浏览器拒绝更新存储，无法确认保存值已移除。', !removed);
+});
 $('toggle-key').addEventListener('click', () => { const visible = $('llm-api-key').type === 'password'; $('llm-api-key').type = visible ? 'text' : 'password'; $('toggle-key').setAttribute('aria-label', visible ? '隐藏 API Key' : '显示 API Key'); $('toggle-key').setAttribute('aria-pressed', String(visible)); $('key-eye').src = visible ? ICON_EYE_OFF : ICON_EYE; });
 $('mimo-preset').addEventListener('click', () => { if (!$('llm-base-url').value) $('llm-base-url').value = 'https://api.xiaomimimo.com/v1'; $('llm-model').value = 'mimo-v2.6-pro'; $('llm-thinking-mode').value = 'on'; $('llm-thinking-format').value = 'thinking'; $('llm-reasoning-effort').value = ''; $('llm-json-mode').checked = false; for (const name of persisted) storage.set(name, $(name).value); storage.set('llm-json-mode', false); updateThinking(); $('llm-test-result').textContent = '已填入 MiMo Pro 预设，保留原 Base URL 与鉴权设置。请按接口要求填写 Key 和模型 ID。'; });
 // Native validation must reveal errors inside folded advanced settings.
@@ -598,4 +794,15 @@ $('llm-test').addEventListener('click', async () => {
   finally { testBusy = false; updateThinking(); }
 });
 $('retry-models').addEventListener('click', checkModels);
+$('open-cleanup').addEventListener('click', () => setCleanupOpen(!cleanupOpen));
+$('close-cleanup').addEventListener('click', () => setCleanupOpen(false));
+for (const id of Object.values(CLEANUP_MODE_IDS)) $(id).addEventListener('change', () => {
+  if (cleanupBusy) return;
+  cleanupPreview = null; $('cleanup-ack').checked = false;
+  cleanupResult = ''; cleanupWarning = false;
+  renderCleanup(); previewCleanup();
+});
+$('cleanup-ack').addEventListener('change', renderCleanup);
+$('refresh-cleanup').addEventListener('click', () => previewCleanup());
+$('confirm-cleanup').addEventListener('click', runCleanup);
 updateUI(); checkModels(); renderQueue(); refreshQueue();

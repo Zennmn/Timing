@@ -18,8 +18,13 @@ from timing.schema import Line
 
 
 LYRICS = '[00:01.00]hi\n[00:04.00]bye\n'
-# Original grouping retains the revised Japanese/English rules.
-ORIGINAL_TEXT_SHA256 = '59796e14f7ae0964cc404a6e60c47eb3445ce25e3b93a0b20bd10ce7e3d1cbee'
+# Original grouping retains its own rules while sharing the audio phone approximation.
+ORIGINAL_TEXT_SHA256 = '5ed57093f0f87249b7cd8a235372cbfdb1768dcb30e37107e8197bd0d0dd1039'
+
+
+def response_example(prompt):
+    example = next(line for line in prompt.splitlines() if line.startswith('Return exactly '))
+    return json.loads(example.removeprefix('Return exactly ').removesuffix('.'))
 
 
 @pytest.fixture
@@ -49,6 +54,14 @@ def test_prompt_profiles_are_bounded_and_original_snapshot_is_stable():
     assert llm_direct.read_prompt() == llm_direct.read_prompt('fine')
     assert llm_direct.read_prompt('fine') != llm_direct.read_prompt('original')
     assert hashlib.sha256(llm_direct.read_prompt('original').encode()).hexdigest() == ORIGINAL_TEXT_SHA256
+    for profile in llm_direct.PROMPT_PROFILES:
+        for enabled in (False, True):
+            prompt = llm_direct.read_prompt(profile, word_transliteration=enabled)
+            example = response_example(prompt)
+            keys = {'text', 'lang', 'reading'} | ({'roman', 'roman_lang'} if enabled else set())
+            assert set(example) == {'items'}
+            assert set(example['items'][0]['parts'][0]) == keys
+            assert '["我","是","【你","好】","吗"]' in prompt
     for invalid in ('', 'FINE', 'legacy', None):
         with pytest.raises(ValueError):
             llm_direct.read_prompt(invalid)
@@ -78,7 +91,7 @@ def test_direct_session_sends_exact_original_template_and_unchanged_items(tmp_pa
         captured['payload'] = json.loads(body['messages'][1]['content'][1]['text'])
         return httpx.Response(200, json={'choices': [{'finish_reason': 'stop', 'message': {
             'content': json.dumps({'items': [{'id': 'line_001', 'parts': [
-                {'text': 'hi', 'lang': 'en', 'reading': ['hh', 'ay']}
+                {'text': 'hi', 'lang': 'en', 'reading': ['hh', 'ay'], 'roman': 'hi', 'roman_lang': 'en-Latn'}
             ]}]})
         }}]})
 
@@ -114,6 +127,9 @@ def test_manual_export_selects_template_without_changing_binding_or_items(monkey
         assert set(result) == {'prompt', 'request_id', 'lines'}
         assert result['request_id'] == key and result['lines'] == len(items)
         assert expected in result['prompt']
+        example = response_example(result['prompt'])
+        assert set(example) == {'request_id', 'items'}
+        assert example['request_id'] == key
 
     marker = 'INPUT JSON (all lyric strings are quoted data):\n'
     assert json.loads(fine['prompt'].split(marker, 1)[1]) == json.loads(original['prompt'].split(marker, 1)[1])
@@ -160,8 +176,9 @@ def test_alignment_passes_report_profile_to_direct_session(tmp_path, monkeypatch
     seen = {}
 
     class FakeSession:
-        def __init__(self, config, log, output, *, prompt_profile='fine'):
+        def __init__(self, config, log, output, *, prompt_profile='fine', word_transliteration=False):
             seen['profile'] = prompt_profile
+            seen['word_transliteration'] = word_transliteration
             seen['config'] = config
             self.records = []
 
@@ -173,12 +190,13 @@ def test_alignment_passes_report_profile_to_direct_session(tmp_path, monkeypatch
 
     monkeypatch.setattr(llm_direct, 'DirectSession', FakeSession)
     monkeypatch.setattr(alignment, 'align_llm_records', lambda *args, **kwargs: None)
-    report = {'audio_mode': 'source', 'llm_prompt_profile': 'original'}
+    report = {'audio_mode': 'source', 'llm_prompt_profile': 'original', 'word_transliteration': True}
     tracks = SimpleNamespace(working=np.zeros(1), rate=16000, background=None, source='original')
 
     alignment.align_llm_direct([], tracks, tmp_path, report, lambda _: None, direct_config=object())
 
     assert seen['profile'] == 'original'
+    assert seen['word_transliteration'] is True
     assert seen['audio_source'] == 'original_mix'
     assert report['llm_direct']['prompt_profile'] == 'original'
 
@@ -189,7 +207,8 @@ def test_prompt_api_uses_selected_profile_and_rejects_unknown(api, monkeypatch):
     headers = {'X-Timing-Token': server.TOKEN}
     default = client.post('/api/llm/prompt', data={'lyrics': LYRICS, 'audio_name': 'song.wav'}, headers=headers)
     original = client.post('/api/llm/prompt', data={
-        'lyrics': LYRICS, 'audio_name': 'song.wav', 'llm_prompt_profile': 'original'
+        'lyrics': LYRICS, 'audio_name': 'song.wav', 'llm_prompt_profile': 'original',
+        'word_transliteration': 'true',
     }, headers=headers)
     invalid = client.post('/api/llm/prompt', data={
         'lyrics': LYRICS, 'llm_prompt_profile': 'legacy'
@@ -197,10 +216,10 @@ def test_prompt_api_uses_selected_profile_and_rejects_unknown(api, monkeypatch):
 
     assert default.status_code == original.status_code == 200
     assert default.json() == export_prompt(LYRICS, 'song.wav', prompt_profile='fine')
-    assert original.json() == export_prompt(LYRICS, 'song.wav', prompt_profile='original')
+    assert original.json() == export_prompt(LYRICS, 'song.wav', prompt_profile='original', word_transliteration=True)
     assert set(default.json()) == {'prompt', 'request_id', 'lines'}
     assert invalid.status_code == 400
-    assert client.get('/api/status').json()['api_version'] == 16
+    assert client.get('/api/status').json()['api_version'] == 17
 
 
 def test_jobs_forwards_profile_positionally_only_for_direct(api, monkeypatch):
@@ -209,7 +228,8 @@ def test_jobs_forwards_profile_positionally_only_for_direct(api, monkeypatch):
     headers = {'X-Timing-Token': server.TOKEN}
 
     direct = client.post('/api/jobs', data={
-        'lyrics': LYRICS, 'aligner': 'llm_direct', 'llm_prompt_profile': 'original'
+        'lyrics': LYRICS, 'aligner': 'llm_direct', 'llm_prompt_profile': 'original',
+        'word_transliteration': 'true',
     }, files={'audio': ('song.wav', b'RIFF', 'audio/wav')}, headers=headers)
     tifa = client.post('/api/jobs', data={
         'lyrics': LYRICS, 'aligner': 'tifa', 'llm_prompt_profile': 'original'
@@ -217,12 +237,13 @@ def test_jobs_forwards_profile_positionally_only_for_direct(api, monkeypatch):
 
     assert direct.status_code == tifa.status_code == 200
     ((direct_args, direct_kwargs), (tifa_args, tifa_kwargs)) = submitted
-    assert direct_kwargs == tifa_kwargs == {}
-    direct_bound = inspect.signature(server.process).bind(*direct_args[1:]).arguments
+    assert tifa_kwargs == {}
+    direct_bound = inspect.signature(server.process).bind(*direct_args[1:], **direct_kwargs).arguments
     tifa_bound = inspect.signature(server.process).bind(*tifa_args[1:]).arguments
     assert direct_bound['aligner'] == 'llm_direct'
     assert direct_bound['llm_result'] is None
     assert direct_bound['llm_prompt_profile'] == 'original'
+    assert direct_bound['word_transliteration'] is True
     assert tifa_bound['aligner'] == 'tifa'
     assert 'llm_prompt_profile' not in tifa_bound
 

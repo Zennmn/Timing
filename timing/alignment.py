@@ -9,7 +9,8 @@ from . import tifa
 def align_llm_direct(lines, tracks, out_dir, report, log, *, syllables=True, direct_config=None):
     from .llm_direct import DirectSession
     session = DirectSession(direct_config, log, out_dir,
-                            prompt_profile=report.get('llm_prompt_profile','fine'))
+                            prompt_profile=report.get('llm_prompt_profile','fine'),
+                            word_transliteration=report.get('word_transliteration', False))
     source = (report.get('background_source') if any(line.role == 'bg' for line in lines) else
               'separated_lead' if report.get('audio_mode') == 'lead' else tracks.source)
     source = 'original_mix' if source == 'original' else source
@@ -26,7 +27,8 @@ def align_llm_import(lines, tracks, out_dir, report, log, *, syllables=True, dir
 
 def align_llm_text(lines, tracks, out_dir, report, log, *, syllables=True, direct_config=None):
     from .llm_text import TextReadingSession
-    session = TextReadingSession(direct_config, log, out_dir)
+    session = TextReadingSession(direct_config, log, out_dir,
+                                 word_transliteration=report.get('word_transliteration', False))
     session.prepare(lines)
     report['llm_text'] = session.report()
     align_llm_records(lines, tracks, out_dir, report, log, session.records)
@@ -95,7 +97,8 @@ def align_tifa(lines, tracks, out_dir, report, log, *, syllables=True, direct_co
         report["coarse_localization"] = coarse_rows
         extra = {'trust_line_timestamps':True} if trusted else {}
         report["tifa"] = tifa.align(singing_audio,singing_rate,lines,out_dir,coarse_rows,log,
-                                    syllables=syllables,background=background_audio, **extra)
+                                    syllables=syllables,background=background_audio,
+                                    detect_language=report.get('language') in ('auto','mixed'), **extra)
         report["timestamp_grid_ms"] = 10
         return
 
@@ -210,7 +213,8 @@ def align_text_tifa(lines, tracks, out_dir, report, log, *, syllables=True):
     report['text_localization'] = localization
     report['input_timing'] = 'automatically_localized_text'
     audio, rate = decode(tracks.main_path, out_dir / 'singing.wav', rate=44100, floating=True)
-    fine = tifa.align(audio, rate, fragments, out_dir, windows, log, syllables=syllables)
+    fine = tifa.align(audio, rate, fragments, out_dir, windows, log, syllables=syllables,
+                      detect_language=report.get('language') in ('auto','mixed'))
     for fragment, window, check in zip(fragments, windows, fine['checks']):
         if 'text_coarse_review_placeholder' in fragment.flags:
             # A failed fine pass keeps only the observed coarse edge union,

@@ -4,7 +4,7 @@ import json
 import re
 from pathlib import Path
 
-from .llm_direct import compile_parts, phone_inventory
+from .llm_direct import compile_llm_parts, compile_parts, phone_inventory, render_prompt
 from .llm_splitter import LlmSession
 
 PROMPT = Path(__file__).with_name('prompts') / 'llm_text.txt'
@@ -45,13 +45,16 @@ def local_parts(line):
 
 
 class TextReadingSession:
-    def __init__(self, config, log, output):
-        self.prompt = PROMPT.read_text(encoding='utf-8')
+    def __init__(self, config, log, output, *, word_transliteration=False):
+        self.word_transliteration = word_transliteration
+        self.prompt = render_prompt(PROMPT.read_text(encoding='utf-8'),
+                                    word_transliteration=word_transliteration)
         self.transport = LlmSession(config, log)
         self.log, self.output = log, Path(output)
         self.output.mkdir(parents=True, exist_ok=True)
         self.records = []
         self.error = None
+        self.roman_references_sent = False
 
     def report(self):
         return {'mode': 'llm_text', 'model': self.transport.config.model,
@@ -59,12 +62,14 @@ class TextReadingSession:
                 'thinking': self.transport.report()['thinking'],
                 'prompt_sha256': hashlib.sha256(self.prompt.encode('utf-8')).hexdigest(),
                 'request_mode': 'whole_lyrics_text', 'audio_sent': False, 'language_hints_sent': False,
+                'roman_references_sent': self.roman_references_sent,
+                'word_transliteration': self.word_transliteration,
                 'automatic_repairs': False, 'error': self.error,
                 'accepted_lines': sum(r.get('source') == 'llm_text' for r in self.records),
                 'dictionary_fallback_lines': [r['line'] for r in self.records if r.get('source') == 'dictionary'],
                 'manual_lines': [r['line'] for r in self.records if r['status'] == 'manual'],
                 'lines': self.records,
-                'note': 'LLM 只接收整首歌词文字，不接收预设语言、音频或时间。语言和读音由模型判断；本地音素校验不限制其为输入标注的语言，词典回退会逐行标记。'}
+                'note': 'LLM 只接收整首歌词文字及可选的非强制逐行音译参考，不接收预设语言、音频或时间。语言和读音由模型判断；本地音素校验不限制其为输入标注的语言，词典回退会逐行标记。'}
 
     def _fallback(self, line, record, reason):
         record['reason'] = reason
@@ -91,10 +96,16 @@ class TextReadingSession:
                 return
             # Construct a fresh allowlist: no audio path, time, title, source file
             # name, translated lyrics or previously measured timing can escape.
+            items=[]
+            for record,line in zip(self.records,lines):
+                item={'id':record['id'],'text':line.text}
+                if isinstance(line.roman,str) and line.roman:
+                    item['roman_reference']=line.roman
+                items.append(item)
             payload = {'english_phone_inventory': sorted(p.split('/', 1)[1] for p in phone_inventory() if p.startswith('en/')),
-                       'items': [{'id': record['id'], 'text': line.text}
-                                 for record, line in zip(self.records, lines)]}
+                       'items': items}
             self.log(f'LLM 文本读音：{len(lines)} 行歌词，一次请求，不发送音频…')
+            self.roman_references_sent = any('roman_reference' in item for item in items)
             rows, error = self.transport._chat(payload, prompt=self.prompt, timeout=TIMEOUT,
                                                max_response_bytes=MAX_RESPONSE_BYTES)
             self.error = error
@@ -113,7 +124,8 @@ class TextReadingSession:
                     matches = by_id[record['id']]
                     if len(matches) != 1 or set(matches[0]) != {'id', 'parts'}:
                         raise ValueError('每个歌词行 ID 需要且只允许一个 id/parts 对象。')
-                    parts = compile_parts(line.text, matches[0]['parts'], 'auto')
+                    parts = compile_llm_parts(line.text, matches[0]['parts'],
+                                              word_transliteration=self.word_transliteration)
                     if not parts:
                         raise ValueError('LLM 未确定本行读音。')
                 except (ValueError, TypeError, KeyError, IndexError) as exc:

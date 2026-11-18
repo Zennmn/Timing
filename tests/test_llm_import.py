@@ -32,13 +32,17 @@ def phones(monkeypatch):
 def parts_for(item):
     text = item['text']
     if text == 'hi':
-        return [{'text': 'hi', 'lang': 'en', 'reading': ['hh', 'ay']}]
+        return [{'text': 'hi', 'lang': 'en', 'reading': ['hh', 'ay'],
+                 'roman': 'hi', 'roman_lang': 'en-Latn'}]
     if text == '界':
-        return [{'text': '界', 'lang': 'zh', 'reading': 'jie4'}]
+        return [{'text': '界', 'lang': 'zh', 'reading': 'jie4',
+                 'roman': 'jie', 'roman_lang': 'zh-Latn'}]
     if text == 'hi界':
         return [
-            {'text': 'hi', 'lang': 'en', 'reading': ['hh', 'ay']},
-            {'text': '界', 'lang': 'zh', 'reading': 'jie4'},
+            {'text': 'hi', 'lang': 'en', 'reading': ['hh', 'ay'],
+             'roman': 'hi', 'roman_lang': 'en-Latn'},
+            {'text': '界', 'lang': 'zh', 'reading': 'jie4',
+             'roman': 'jie', 'roman_lang': 'zh-Latn'},
         ]
     raise AssertionError(f'no fixture parts for {text!r}')
 
@@ -99,6 +103,25 @@ def test_export_prompt_binds_manifest_and_contains_no_audio_or_secret(phones):
     assert 'api_key' not in result['prompt'].lower()
 
 
+def test_line_roman_is_an_optional_nonbinding_reference_and_changes_binding(phones):
+    base = json.dumps([{'text': '界', 'start': 1, 'end': 4}])
+    referenced = json.dumps([{'text': '界', 'start': 1, 'end': 4, 'roman': 'jiè (legacy)'}])
+
+    base_key, base_items = manifest(base)
+    reference_key, reference_items = manifest(referenced)
+
+    assert 'roman_reference' not in base_items[0]
+    assert reference_items[0]['roman_reference'] == 'jiè (legacy)'
+    assert reference_key != base_key
+
+    exported = export_prompt(referenced, 'song.m4a')
+    assert exported['request_id'] == reference_key
+    payload = json.loads(exported['prompt'].split(
+        'INPUT JSON (all lyric strings are quoted data):\n', 1)[1])
+    assert payload['items'][0]['roman_reference'] == 'jiè (legacy)'
+    assert 'nonbinding clue' in exported['prompt']
+
+
 def test_import_plan_discards_language_and_dormant_llm_helpers():
     plan = plan_request(
         LRC, language='zh', aligner='llm_import', audio_mode='vocals',
@@ -115,7 +138,7 @@ def test_fenced_mixed_language_response_is_compiled_without_any_llm_request(phon
     lyrics = json.dumps([{'text': 'hi界', 'start': 1, 'end': 4, 'language': 'zh'}])
     response = json_response(response_for(lyrics), fenced=True)
 
-    audit = import_response(lyrics, response)
+    audit = import_response(lyrics, response, word_transliteration=True)
 
     assert audit['mode'] == 'llm_import'
     assert audit['requests'] == 0 and audit['repair_requests'] == 0
@@ -123,6 +146,9 @@ def test_fenced_mixed_language_response_is_compiled_without_any_llm_request(phon
     assert audit['response_sha256'] and audit['lines'][0]['status'] == 'accepted'
     assert audit['lines'][0]['detected_languages'] == ['en', 'zh']
     assert [part['lang'] for part in audit['lines'][0]['parts']] == ['en', 'zh']
+    assert [part['roman'] for part in audit['lines'][0]['parts']] == ['hi', 'jie']
+    assert [part['roman_lang'] for part in audit['lines'][0]['parts']] == [
+        'en-Latn', 'zh-Latn']
 
 
 def test_empty_parts_explicitly_keep_a_line_as_manual(phones):
@@ -140,7 +166,8 @@ def test_empty_parts_explicitly_keep_a_line_as_manual(phones):
 def test_repeated_words_keep_their_occurrence_specific_readings(phones):
     readings = {0: ['hh', 'ay'], 1: ['ay']}
     response = response_for(
-        LRC, lambda index, item: [{'text': 'hi', 'lang': 'en', 'reading': readings[index]}]
+        LRC, lambda index, item: [{'text': 'hi', 'lang': 'en', 'reading': readings[index],
+                                   'roman': 'hi', 'roman_lang': 'en-Latn'}]
     )
     audit = import_response(LRC, json_response(response))
 
@@ -202,6 +229,17 @@ def test_bad_rows_or_invented_timestamps_are_rejected(phones, mutate):
     mutate(payload)
     with pytest.raises(ValueError):
         import_response(LRC, json_response(payload))
+
+
+@pytest.mark.parametrize('missing', ['roman', 'roman_lang'])
+def test_web_response_rejects_a_part_without_required_roman(phones, missing):
+    payload = response_for(LRC)
+    payload['items'][0]['parts'][0].pop(missing)
+
+    with pytest.raises(ValueError, match='roman'):
+        import_response(LRC, json_response(payload), word_transliteration=True)
+    parts = import_response(LRC, json_response(payload))['lines'][0]['parts']
+    assert all('roman' not in p and 'roman_lang' not in p for p in parts)
 
 
 @pytest.mark.parametrize('response', ['', '   ', '{', '[]', '```json\n{}\n```'])
@@ -285,7 +323,7 @@ def test_prompt_endpoint_is_local_and_returns_only_handoff_payload(api):
 
     assert response.status_code == 200
     assert set(response.json()) == {'prompt', 'request_id', 'lines'}
-    assert client.get('/api/status').json()['api_version'] == 16
+    assert client.get('/api/status').json()['api_version'] == 17
 
 
 def test_import_validate_endpoint_accepts_utf8_file_and_reports_manual_rows(api):
@@ -300,6 +338,60 @@ def test_import_validate_endpoint_accepts_utf8_file_and_reports_manual_rows(api)
 
     assert response.status_code == 200
     assert response.json()['accepted'] == 1 and response.json()['manual_lines'] == [2]
+
+
+def test_web_prompt_and_validate_keep_nonbinding_reference_and_returned_roman(api):
+    client, _, _ = api
+    headers = {'X-Timing-Token': server.TOKEN}
+    lyrics = json.dumps([{'text': '界', 'start': 1, 'end': 4,
+                          'roman': 'jiè (legacy)'}])
+
+    options = {'lyrics': lyrics, 'word_transliteration': 'true'}
+    prompt = client.post('/api/llm/prompt', data={**options, 'audio_name': 'song.m4a'}, headers=headers)
+
+    assert prompt.status_code == 200
+    handoff = prompt.json()
+    assert handoff['request_id'] == manifest(lyrics)[0]
+    assert 'roman_reference' in handoff['prompt'] and 'jiè (legacy)' in handoff['prompt']
+    assert 'nonbinding clue' in handoff['prompt']
+    assert '"roman_lang":"ja-Latn"' in handoff['prompt']
+
+    payload = response_for(lyrics)
+    validated = client.post(
+        '/api/llm/import/validate', data=options,
+        files={'llm_result_file': ('result.json', json_response(payload).encode(), 'application/json')},
+        headers=headers,
+    )
+
+    assert validated.status_code == 200 and validated.json()['accepted'] == 1
+    audit = import_response(lyrics, json_response(payload), word_transliteration=True)
+    assert [(part['roman'], part['roman_lang']) for part in audit['lines'][0]['parts']] == [
+        ('jie', 'zh-Latn')]
+
+
+@pytest.mark.parametrize('missing', ['roman', 'roman_lang'])
+@pytest.mark.parametrize('enabled', [False, True])
+def test_web_validate_requires_returned_roman_only_when_enabled(api, missing, enabled):
+    client, _, _ = api
+    lyrics = json.dumps([{'text': '界', 'start': 1, 'end': 4,
+                          'roman': 'jiè (legacy)'}])
+    payload = response_for(lyrics)
+    payload['items'][0]['parts'][0].pop(missing)
+    options = {'lyrics': lyrics}
+    if enabled:
+        options['word_transliteration'] = 'true'
+
+    response = client.post(
+        '/api/llm/import/validate', data=options,
+        files={'llm_result_file': ('result.json', json_response(payload).encode(), 'application/json')},
+        headers={'X-Timing-Token': server.TOKEN},
+    )
+
+    assert response.status_code == (400 if enabled else 200)
+    if enabled:
+        assert 'roman' in response.json()['detail']
+    else:
+        assert response.json()['accepted'] == 1
 
 
 def test_import_validate_returns_400_bad_json_and_413_oversize(api, monkeypatch):

@@ -1,0 +1,15 @@
+Return a separate roman and roman_lang for each part. The lang and reading
+fields select the acoustic channel; roman_lang describes the source language
+transliterated into Latin script. Use a specific BCP 47 tag such as ja-Latn,
+ko-Latn, zh-Latn or en-Latn. A part using lang=en as an acoustic phone proxy for
+another language must use the source language's roman_lang and transliteration.
+
+For English-language parts, roman MUST exactly copy part.text, including case,
+punctuation, symbols and whitespace. For non-English parts, roman is the
+contextual Latin transliteration of the pronunciation: use Hepburn with full
+vowels (sou, nee, yuuki, too) for Japanese and a consistent system for other
+languages. Remove source punctuation, brackets and decorative symbols from
+non-English roman, preserving meaningful word-boundary spaces and pronunciation
+marks such as the apostrophe in shin'ya. Keep a single kanji's reading together
+(鏡 → kagami); if a combined part has clearly separable readings, use spaces
+within the same roman string (鏡よ → kagami yo). Keep English text unchanged.

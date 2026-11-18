@@ -1,7 +1,30 @@
 """Alignment reports and TTML export; independent of model orchestration."""
+import re
 import json
+
 from .schema import serialize
+
 from .ttml import export
+
+
+LLM_ALIGNERS = {"llm_text", "llm_direct", "llm_import"}
+
+
+def _language_from_lyrics(lines):
+    """Fallback for aligners like CTC that do not expose an audio language choice."""
+    japanese = re.compile(r"[ぁ-ゖァ-ヺー]")
+    english = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿ]")
+    han = re.compile(r"[一-龯㐀-䶿]")
+    has_japanese = any(japanese.search(line.text) for line in lines)
+    has_english = any(english.search(line.text) for line in lines)
+    has_han = any(han.search(line.text) for line in lines)
+    if has_japanese and has_english:
+        return "mixed"
+    if has_han and not has_japanese:
+        return "auto"  # Han alone cannot distinguish Japanese from Mandarin
+    if not has_japanese and not has_english:
+        return "auto"
+    return "ja" if has_japanese else "en"
 
 
 def finish(lines, duration, language, title, out_dir, report, log):
@@ -10,6 +33,19 @@ def finish(lines, duration, language, title, out_dir, report, log):
         report['llm_splitter'] = current_session().report()
         stats = report['llm_splitter']
         log(f"LLM 请求合计：{stats['requests']} 次（首发 {stats['initial_requests']} 次，修正 {stats['repair_requests']} 次），{stats['fallback_words']} 个词保留整词。")
+    automatic_language = language in ("auto", "mixed")
+    if automatic_language and report.get("aligner") not in LLM_ALIGNERS:
+        tifa_language = (report.get("tifa") or {}).get("detected_language")
+        if tifa_language in ("ja", "en", "mixed", "auto"):
+            language = tifa_language
+            report["language_detection"] = "tifa_selected_pronunciation"
+        elif report.get("aligner") == "ctc":
+            language = _language_from_lyrics(lines)
+            report["language_detection"] = "lyrics_script_fallback"
+        elif tifa_language is None:
+            language = _language_from_lyrics(lines)
+            report["language_detection"] = "lyrics_script_fallback"
+        report["language"] = language
     review, reading_notices = [], []
     for index, line in enumerate(lines):
         for word in line.words:
@@ -79,7 +115,15 @@ def finish(lines, duration, language, title, out_dir, report, log):
         source = '模型粗定位范围或已有逐句范围' if report.get('text_localization') else '整句 LRC 时间'
         report["warnings"].insert(0, f"第 {', '.join(map(str,manual))} 行未获得完整逐字轴，仅保留{source}供人工补轴；其他有效单位已保留。")
     fallback = (report.get('llm_splitter') or {}).get('fallback_words',0)
-    data = export(lines, duration, language, title)
+    llm_route = report.get('aligner') in LLM_ALIGNERS
+    word_transliteration = report.get('word_transliteration', False)
+    if word_transliteration:
+        missing = sum(any(not (w.roman and w.roman_lang) for w in line.words) for line in lines)
+        if missing:
+            report['warnings'].insert(0, f'逐字音译未导出：{missing} 行的音译未齐，保留已有的逐行音译。')
+    data = export(lines, duration, language, title,
+                  include_line_languages=not (llm_route or automatic_language),
+                  include_word_transliteration=word_transliteration)
     (out_dir / "lyrics.ttml").write_bytes(data)
     (out_dir / "alignment.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     unresolved_count = sum(len(r['units']) for r in partial)

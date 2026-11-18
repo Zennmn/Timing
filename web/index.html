@@ -4,7 +4,7 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="timing-token" content="__TIMING_TOKEN__">
 <title>Timing · 歌词打轴</title>
-<link rel="stylesheet" href="/static/styles.css?v=0.22.0">
+<link rel="stylesheet" href="/static/styles.css?v=0.23.0-task-file-cleanup-1">
 </head>
 <body>
 <main>
@@ -37,6 +37,7 @@
 <div id="trust-timestamps-settings" class="local-settings"><label class="check" for="trust-line-timestamps"><input id="trust-line-timestamps" type="checkbox" aria-describedby="trust-timestamps-hint">信任逐句时间轴，跳过 MMS 粗定位</label><p id="trust-timestamps-hint" class="hint">仅在你确认 LRC 逐句范围可靠（可只提供开始时间）或 TTML 已转换为带起止时间的逐句歌词时使用；纯文本和 MMS 单独对齐不可用。</p></div>
 <p id="mode-hint" class="mode-hint"></p>
 <div id="prompt-profile-settings" class="local-settings hidden"><label for="llm-prompt-profile">日语拆分</label><select id="llm-prompt-profile" name="llm_prompt_profile" aria-describedby="prompt-profile-hint"><option value="fine">细拆（默认）</option><option value="original">适度合并（旧版）</option></select><p id="prompt-profile-hint" class="hint">仅影响之后生成的提示词；切换后请重新生成。已粘贴的网页 LLM 结果会保留，实际导入的分词仍以结果为准。</p></div>
+<div id="word-transliteration-settings" class="local-settings hidden"><label class="check" for="word-transliteration"><input id="word-transliteration" name="word_transliteration" type="checkbox" aria-describedby="word-transliteration-hint">输出逐字音译</label><p id="word-transliteration-hint" class="hint">关闭时保留已有的逐行音译。开启后，音译覆盖完整时才会写入逐字音译轨道。</p></div>
 <div id="llm-import-panel" class="helper hidden">
 <p id="llm-import-audio-name" class="hint">尚未选择音频；最终生成前需选择完整歌曲。</p>
 <ol class="hint">
@@ -57,8 +58,9 @@
 <fieldset id="llm-settings" class="api-settings hidden" disabled><legend>API 配置</legend>
 <div class="api-grid"><div class="inline-field"><label for="llm-base-url">Base URL</label><input id="llm-base-url" name="llm_base_url" type="url" placeholder="https://your-provider.example/v1" autocomplete="off"></div><div class="inline-field"><label for="llm-model">模型</label><input id="llm-model" name="llm_model" type="text" placeholder="接口的模型 ID" autocomplete="off"></div></div>
 <div class="key-row"><label for="llm-api-key">API Key</label><div class="key-control"><input id="llm-api-key" name="llm_api_key" type="password" placeholder="免密的本地接口可留空" autocomplete="off" spellcheck="false" aria-describedby="key-hint"><button id="toggle-key" type="button" aria-label="显示 API Key" aria-pressed="false"><img id="key-eye" class="icon" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgdmlld0JveD0iMCAwIDI0IDI0IiBmaWxsPSJub25lIiBzdHJva2U9IiM0ZTU5NjciIHN0cm9rZS13aWR0aD0iMiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBzdHJva2UtbGluZWpvaW49InJvdW5kIj48cGF0aCBkPSJNMSAxMnM0LTggMTEtOCAxMSA4IDExIDgtNCA4LTExIDgtMTEtOC0xMS04eiIvPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTIiIHI9IjMiLz48L3N2Zz4=" alt=""></button></div></div>
+<div class="advanced-actions"><label class="check"><input id="remember-api-key" type="checkbox" checked aria-describedby="key-hint">记住 API Key（仅此浏览器）</label><button id="clear-api-key" class="text-button" type="button" aria-label="清除当前和已保存的 API Key">清除</button></div>
+<p id="key-hint" class="hint" role="status">输入 API Key 后会保存在此浏览器，刷新页面可恢复；不会写入任务文件。</p>
 <details id="api-advanced" class="advanced"><summary><strong>高级接口设置</strong><span id="advanced-summary" class="summary-note">自定义请求头、Key 发送格式、JSON 模式、思考设置等</span></summary><div class="advanced-body">
-<p id="key-hint" class="hint">Key 只用于本次页面提交，不写入浏览器存储或任务文件；刷新后需重填。</p>
 <label for="llm-api-key-header">API Key 请求头名称</label><input id="llm-api-key-header" name="llm_api_key_header" type="text" value="Authorization" maxlength="128" required autocomplete="off" spellcheck="false" placeholder="Authorization / x-api-key / api-key">
 <label for="llm-api-key-format">Key 发送格式</label><select id="llm-api-key-format" name="llm_api_key_format"><option value="auto">自动：Authorization 加 Bearer，其他名称原样发送</option><option value="bearer">添加 Bearer 前缀</option><option value="raw">原样发送 Key</option></select><p class="hint">请求头只填名称；API Key 框只填密钥本身。</p>
 <label class="check"><input id="llm-json-mode" name="llm_json_mode" type="checkbox">JSON 模式（接口支持时可开）</label>
@@ -74,6 +76,21 @@
 </form>
 <section id="queue-section" class="queue-section" aria-labelledby="queue-heading">
 <div class="queue-heading"><div><h2 id="queue-heading">任务队列</h2><p>可以连续添加歌曲；当前歌曲处理时也可以继续提交下一首。</p></div><p id="queue-summary" class="queue-summary" role="status">正在读取任务…</p></div>
+<section id="cleanup-tools" class="cleanup-tools hidden" aria-labelledby="cleanup-heading">
+<button id="open-cleanup" class="cleanup-open" type="button" aria-expanded="false" aria-controls="cleanup-panel">清理任务文件</button>
+<div id="cleanup-panel" class="cleanup-panel hidden" role="region" aria-labelledby="cleanup-heading">
+<div class="cleanup-panel-top"><div><h3 id="cleanup-heading">清理已结束任务的文件</h3><p>清理历史任务和已结束的本机任务；上传原曲、TTML、对齐记录和任务信息会保留。</p></div><button id="close-cleanup" class="cleanup-close" type="button" aria-label="关闭清理设置">×</button></div>
+<fieldset class="cleanup-modes"><legend>清理范围</legend>
+<label><input id="cleanup-mode-work" name="cleanup-mode" type="radio" value="work" checked><span><strong>只清理中间文件</strong><small>保留主唱、人声和伴奏分轨。</small></span></label>
+<label><input id="cleanup-mode-keep-vocals" name="cleanup-mode" type="radio" value="keep_vocals"><span><strong>同时清理伴奏及和声</strong><small>保留主唱和对齐用人声。</small></span></label>
+<label><input id="cleanup-mode-all-audio" name="cleanup-mode" type="radio" value="all_audio"><span><strong>清理全部生成音轨</strong><small>旧任务的分轨下载入口会随之消失。</small></span></label>
+</fieldset>
+<p id="cleanup-preview" class="cleanup-preview" role="status">正在估算可清理文件…</p>
+<label class="check cleanup-ack"><input id="cleanup-ack" type="checkbox"> 我确认永久删除上述文件</label>
+<div class="cleanup-actions"><button id="refresh-cleanup" type="button">重新估算</button><button id="confirm-cleanup" class="primary" type="button" disabled>永久清理</button></div>
+<p id="cleanup-result" class="cleanup-result" role="status" aria-live="polite"></p>
+</div>
+</section>
 <p id="queue-message" class="queue-message" role="status" aria-live="polite"></p>
 <div id="queue-empty" class="queue-empty hidden">暂无任务。选择音频和歌词后加入队列。</div>
 <div id="queue-list" class="queue-list"></div>
@@ -81,6 +98,6 @@
 <section id="progress" class="progress hidden" tabindex="-1" aria-labelledby="state"><div class="progress-top"><strong id="state" role="status" aria-live="polite">准备中…</strong><span id="job-info"></span></div><p id="result-message"></p><div id="links" class="links"></div><details id="log-details"><summary>处理日志</summary><pre id="log" aria-live="off"></pre></details><p id="error" class="warning" role="alert"></p></section>
 <footer>Timing · 本机计算与保存 · TTML 可直接导入 AMLL；下载后先试听校对，少数字需手工补时间。</footer>
 </main>
-<script src="/static/ui-logic.js?v=0.22.0"></script>
-<script src="/static/app.js?v=0.22.0-trust-timestamps-1"></script>
+<script src="/static/ui-logic.js?v=0.23.0"></script>
+<script src="/static/app.js?v=0.23.0-remember-api-key-1-task-file-cleanup-1"></script>
 </body></html>

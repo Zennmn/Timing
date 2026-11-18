@@ -16,13 +16,14 @@
  *   analyzeLyrics(raw, language, llmRoute) -> {empty,error,kind,count,anchored,partial,
  *                          hasEnglish,hasJapanese,hasChinese,hasBackground,
  *                          language,effectiveLanguages}
- *   resolveOptions({lyrics,language,aligner,syllables,splitter,promptProfile,
+ *   resolveOptions({lyrics,language,aligner,syllables,splitter,promptProfile,wordTransliteration,
  *                   hasVocals,audioMode}) -> {aligner,engine,language,showLanguage,
  *                   valid,error,showEnglish,showSplitter,allowLlmSplitter,
- *                   syllables,splitter,llm,sendsAudio,showImport,showPromptProfile,promptReady,
+ *                   syllables,splitter,llm,sendsAudio,showImport,showPromptProfile,
+ *                   showWordTransliteration,wordTransliteration,promptReady,
  *                   promptProfile,audioMode,source,models,hasBackground}
  *   submissionFields(plan) -> the browser payload fields owned by the UI.
- *   serviceCompatibility(status) -> boolean for Timing with API 15 or newer.
+ *   serviceCompatibility(status) -> boolean for Timing with API 17 or newer.
  *
  * Expected values mirror the shared backend rules:
  *   timing/request_plan.py  ALIGNERS / AUDIO_MODES / SPLITTERS / LANGUAGES
@@ -122,6 +123,8 @@ const MIXED_TEXT = '光の中へ\nRun into the light';
 const KO_TEXT = '빛 속으로\n달려가\n밤이 밝아와';
 const ZH_TEXT = '今天很好\n明天更好';
 const ZH_EN_TEXT = '今天很好\nWe are moving on';
+const SYNTHETIC_API_KEY = 'example-key-for-ui-test-1';
+const NEXT_SYNTHETIC_API_KEY = 'example-key-for-ui-test-2';
 const FULL_LRC = '[00:12.34]光の中へ\n[00:18.00]Run into the light';
 const PARTIAL_LRC = '光の中へ\n[00:18.00]Run into the light';
 const META_ONLY_LRC = '[ar:测试歌手]\n[ti:歌词]';
@@ -165,6 +168,7 @@ function preferences(overrides) {
     syllables: true,
     splitter: 'syllabify',
     promptProfile: 'fine',
+    wordTransliteration: false,
     hasVocals: false,
     audioMode: 'lead',
     trustLineTimestamps: false,
@@ -233,12 +237,18 @@ async function makeAppHarness(statusOverrides = {}, initialStorage = {}, queueOp
   const timers = new Map();
   const ttmlRequests = [], statusRequests = [];
   const queueRequests = [], submitRequests = [], cancelRequests = [], detailRequests = [];
+  const promptRequests = [], checkRequests = [];
+  const cleanupPreviewRequests = [], cleanupRunRequests = [];
   let nextTimer = 1;
   let ttmlHandler = async () => fakeResponse(500, { detail: 'unexpected TTML request' });
   let queueHandler = queueOptions.queue || (async () => fakeResponse(200, { jobs: [], running: 0, waiting: 0, limit: 50 }));
   let submitHandler = queueOptions.submit || (async () => fakeResponse(500, { detail: 'unexpected submit request' }));
   let cancelHandler = queueOptions.cancel || (async () => fakeResponse(500, { detail: 'unexpected cancel request' }));
   let detailHandler = queueOptions.detail || (async () => fakeResponse(404, { detail: 'unexpected detail request' }));
+  let cleanupPreviewHandler = queueOptions.cleanupPreview || (async () => fakeResponse(500, { detail: 'unexpected cleanup preview request' }));
+  let cleanupRunHandler = queueOptions.cleanupRun || (async () => fakeResponse(500, { detail: 'unexpected cleanup request' }));
+  let promptHandler = async () => fakeResponse(200, { prompt: 'test prompt', request_id: 'test-request', lines: 1 });
+  let checkHandler = async () => fakeResponse(200, { ok: true, lines: 1, accepted: 1, manual_lines: [] });
 
   const element = (id) => {
     if (!elements.has(id)) elements.set(id, fakeElement(id));
@@ -264,6 +274,7 @@ async function makeAppHarness(statusOverrides = {}, initialStorage = {}, queueOp
   element('llm-thinking-format').value = 'reasoning_effort';
   element('llm-api-key-header').value = 'Authorization';
   element('llm-api-key-format').value = 'auto';
+  element('cleanup-mode-work').checked = true;
 
   const document = {
     getElementById: element,
@@ -273,20 +284,40 @@ async function makeAppHarness(statusOverrides = {}, initialStorage = {}, queueOp
     execCommand: () => true,
   };
   const storageValues = new Map(Object.entries(initialStorage));
+  const storageDenied = Boolean(queueOptions.storageDenied);
   const context = vm.createContext({
     document,
     window: { getSelection: () => ({ removeAllRanges() {}, addRange() {} }) },
     localStorage: {
-      getItem: (key) => storageValues.has(key) ? storageValues.get(key) : null,
-      setItem: (key, value) => storageValues.set(key, String(value)),
-      removeItem: (key) => storageValues.delete(key),
+      getItem: (key) => {
+        if (storageDenied) throw new Error('storage denied');
+        return storageValues.has(key) ? storageValues.get(key) : null;
+      },
+      setItem: (key, value) => {
+        if (storageDenied) throw new Error('storage denied');
+        storageValues.set(key, String(value));
+      },
+      removeItem: (key) => {
+        if (storageDenied) throw new Error('storage denied');
+        storageValues.delete(key);
+      },
     },
     navigator: {},
     fetch: async (url, init = {}) => {
       if (url === '/api/status') {
         statusRequests.push(init);
-        return fakeResponse(200, { app: 'Timing', api_version: 16, version: 'test', queued: 0,
+        return fakeResponse(200, { app: 'Timing', api_version: 17, version: 'test', queued: 0, task_file_cleanup: false,
           models: { ctc: true, tifa: true, bs_lead: true, separator: true, singing: false, sofa: false }, ...statusOverrides });
+      }
+      if (url === '/api/llm/prompt') { promptRequests.push(init); return promptHandler(init); }
+      if (url === '/api/llm/import/validate') { checkRequests.push(init); return checkHandler(init); }
+      if (url.startsWith('/api/cleanup?')) {
+        cleanupPreviewRequests.push({ url, init });
+        return cleanupPreviewHandler(url, init);
+      }
+      if (url === '/api/cleanup') {
+        cleanupRunRequests.push(init);
+        return cleanupRunHandler(init);
       }
       if (url === '/api/jobs') {
         if (init.method === 'POST') { submitRequests.push(init); return submitHandler(init); }
@@ -324,6 +355,8 @@ async function makeAppHarness(statusOverrides = {}, initialStorage = {}, queueOp
     setSubmitHandler(handler) { submitHandler = handler; },
     setCancelHandler(handler) { cancelHandler = handler; },
     setDetailHandler(handler) { detailHandler = handler; },
+    setPromptHandler(handler) { promptHandler = handler; },
+    setCheckHandler(handler) { checkHandler = handler; },
     element,
     dispatch: (id, type) => element(id).dispatch(type),
     runNextTimer() {
@@ -342,6 +375,12 @@ async function makeAppHarness(statusOverrides = {}, initialStorage = {}, queueOp
     submitRequests,
     cancelRequests,
     detailRequests,
+    promptRequests,
+    checkRequests,
+    cleanupPreviewRequests,
+    cleanupRunRequests,
+    setCleanupPreviewHandler(handler) { cleanupPreviewHandler = handler; },
+    setCleanupRunHandler(handler) { cleanupRunHandler = handler; },
   };
 }
 
@@ -385,16 +424,17 @@ describe('shipped files', () => {
     assert.deepStrictEqual([...lookup('REQUIRED_MODELS')], REQUIRED_MODELS);
   });
 
-  test('serviceCompatibility requires the trusted-timestamp API 16 minimum', () => {
+  test('serviceCompatibility requires the word-transliteration API 17 minimum', () => {
     const lookup = loadPureFile(UI_LOGIC);
-    assert.equal(lookup('EXPECTED_API_VERSION'), 16);
-    assert.equal(lookup('MIN_API_VERSION'), 16);
+    assert.equal(lookup('EXPECTED_API_VERSION'), 17);
+    assert.equal(lookup('MIN_API_VERSION'), 17);
     const compatible = lookup('serviceCompatibility');
     assert.equal(compatible({ app: 'Timing', api_version: 15 }), false);
-    assert.equal(compatible({ app: 'Timing', api_version: 16 }), true);
-    assert.equal(compatible({ app: 'Timing', api_version: 17 }), true, 'newer APIs must remain compatible');
-    assert.equal(compatible({ app: 'Other', api_version: 16 }), false);
-    assert.equal(compatible({ app: 'Timing', api_version: '16' }), false);
+    assert.equal(compatible({ app: 'Timing', api_version: 16 }), false, 'the always-on word track backend is too old');
+    assert.equal(compatible({ app: 'Timing', api_version: 17 }), true);
+    assert.equal(compatible({ app: 'Timing', api_version: 18 }), true, 'newer APIs must remain compatible');
+    assert.equal(compatible({ app: 'Other', api_version: 17 }), false);
+    assert.equal(compatible({ app: 'Timing', api_version: '17' }), false);
     assert.equal(compatible(null), false);
   });
 
@@ -417,6 +457,23 @@ describe('shipped files', () => {
     const css = fs.readFileSync(STYLES_CSS, 'utf8');
     assert.ok(css.length > 4000, 'styles.css looks truncated: ' + css.length + ' bytes');
     assert.ok(css.includes('.lyrics-box'), 'styles.css is missing the form styles');
+  });
+
+  test('the cleanup control has three scopes, a preview action and permanent confirmation', () => {
+    for (const id of ['cleanup-tools', 'open-cleanup', 'cleanup-panel', 'cleanup-mode-work',
+      'cleanup-mode-keep-vocals', 'cleanup-mode-all-audio', 'cleanup-preview', 'cleanup-ack',
+      'refresh-cleanup', 'confirm-cleanup', 'cleanup-result']) {
+      assert.ok(html.includes('id="' + id + '"'), 'missing cleanup control #' + id);
+    }
+    assert.match(html, /id="cleanup-mode-work"[^>]*\bchecked\b/);
+    assert.ok(html.includes('上传原曲、TTML、对齐记录和任务信息会保留'));
+    assert.ok(html.includes('我确认永久删除上述文件'));
+    assert.ok(appSource.includes("fetch('/api/cleanup?mode=' + encodeURIComponent(mode)"));
+    assert.ok(appSource.includes("fetch('/api/cleanup'"));
+    assert.match(appSource, /'Content-Type': 'application\/json', 'X-Timing-Token': token/);
+    const css = fs.readFileSync(STYLES_CSS, 'utf8');
+    assert.ok(css.includes('.cleanup-panel'));
+    assert.ok(css.includes('.cleanup-modes'));
   });
 
   test('the request token ships exactly once, through the timing-token meta tag', () => {
@@ -442,7 +499,7 @@ describe('shipped files', () => {
   });
 
   test('older API responses are rejected instead of using a stale cached frontend', async () => {
-    for (const apiVersion of [10, 12, 14]) {
+    for (const apiVersion of [10, 12, 14, 16]) {
       const app = await makeAppHarness({ api_version: apiVersion });
       assert.equal(app.element('submit').disabled, true);
       assert.match(app.element('model-status').textContent, /版本不匹配.*Ctrl\+F5/);
@@ -469,6 +526,97 @@ describe('shipped files', () => {
     app.element('language').value = 'en';
     await app.dispatch('language', 'change');
     assert.equal(app.storageValues.get('timing-language'), 'en');
+  });
+
+  test('API key memory defaults on and is described as browser-local', async () => {
+    const app = await makeAppHarness();
+    assert.equal(app.element('remember-api-key').checked, true);
+    assert.match(app.element('key-hint').textContent, /保存在此浏览器/);
+    assert.match(app.element('key-hint').textContent, /不会写入任务文件/);
+    assert.match(html, /id="remember-api-key"[^>]*\bchecked\b/);
+    assert.match(html, /记住 API Key（仅此浏览器）/);
+    assert.match(html, /id="clear-api-key"[^>]*>清除<\/button>/);
+    assert.match(html, /app\.js\?v=0\.23\.0-remember-api-key-1/);
+    assert.doesNotMatch(html, /不写入浏览器存储|刷新后需重填/);
+  });
+
+  test('API key input and change persist only the key and restore it on reload', async () => {
+    const initialStorage = {
+      'timing-llm-base-url': 'https://synthetic.invalid/v1',
+      'timing-llm-model': 'synthetic-model',
+      'timing-llm-api-key': SYNTHETIC_API_KEY,
+      'timing-language': 'en',
+    };
+    const app = await makeAppHarness({}, initialStorage);
+    assert.equal(app.element('llm-api-key').value, SYNTHETIC_API_KEY);
+    assert.equal(app.element('llm-base-url').value, initialStorage['timing-llm-base-url']);
+    assert.equal(app.element('llm-model').value, initialStorage['timing-llm-model']);
+
+    app.element('llm-api-key').value = NEXT_SYNTHETIC_API_KEY;
+    await app.dispatch('llm-api-key', 'input');
+    assert.equal(app.storageValues.get('timing-llm-api-key'), NEXT_SYNTHETIC_API_KEY);
+    await app.dispatch('llm-api-key', 'change');
+    assert.equal(app.storageValues.get('timing-llm-base-url'), initialStorage['timing-llm-base-url']);
+    assert.equal(app.storageValues.get('timing-llm-model'), initialStorage['timing-llm-model']);
+    assert.equal(app.storageValues.get('timing-language'), initialStorage['timing-language']);
+
+    const reloaded = await makeAppHarness({}, Object.fromEntries(app.storageValues));
+    assert.equal(reloaded.element('llm-api-key').value, NEXT_SYNTHETIC_API_KEY);
+    assert.equal(reloaded.element('remember-api-key').checked, true);
+  });
+
+  test('opting out removes only the saved key and keeps the current field until reload', async () => {
+    const initialStorage = {
+      'timing-llm-base-url': 'https://synthetic.invalid/v1',
+      'timing-llm-model': 'synthetic-model',
+      'timing-llm-api-key': SYNTHETIC_API_KEY,
+      'timing-language': 'en',
+    };
+    const app = await makeAppHarness({}, initialStorage);
+    app.element('remember-api-key').checked = false;
+    await app.dispatch('remember-api-key', 'change');
+    assert.equal(app.element('llm-api-key').value, SYNTHETIC_API_KEY);
+    assert.equal(app.storageValues.has('timing-llm-api-key'), false);
+    assert.equal(app.storageValues.get('timing-llm-api-key-remember'), 'false');
+    assert.equal(app.storageValues.get('timing-llm-base-url'), initialStorage['timing-llm-base-url']);
+    assert.equal(app.storageValues.get('timing-llm-model'), initialStorage['timing-llm-model']);
+    assert.equal(app.storageValues.get('timing-language'), initialStorage['timing-language']);
+
+    app.element('llm-api-key').value = NEXT_SYNTHETIC_API_KEY;
+    await app.dispatch('llm-api-key', 'input');
+    await app.dispatch('llm-api-key', 'change');
+    assert.equal(app.storageValues.has('timing-llm-api-key'), false);
+
+    const reloaded = await makeAppHarness({}, Object.fromEntries(app.storageValues));
+    assert.equal(reloaded.element('remember-api-key').checked, false);
+    assert.equal(reloaded.element('llm-api-key').value, '');
+  });
+
+  test('clear blanks the key and removes its saved value without erasing other preferences', async () => {
+    const initialStorage = {
+      'timing-llm-base-url': 'https://synthetic.invalid/v1',
+      'timing-llm-model': 'synthetic-model',
+      'timing-llm-api-key': SYNTHETIC_API_KEY,
+      'timing-language': 'en',
+    };
+    const app = await makeAppHarness({}, initialStorage);
+    await app.dispatch('clear-api-key', 'click');
+    assert.equal(app.element('llm-api-key').value, '');
+    assert.equal(app.storageValues.has('timing-llm-api-key'), false);
+    assert.equal(app.element('remember-api-key').checked, true);
+    assert.equal(app.storageValues.get('timing-llm-base-url'), initialStorage['timing-llm-base-url']);
+    assert.equal(app.storageValues.get('timing-llm-model'), initialStorage['timing-llm-model']);
+    assert.equal(app.storageValues.get('timing-language'), initialStorage['timing-language']);
+    assert.match(app.element('key-hint').textContent, /已清除/);
+  });
+
+  test('denied browser storage does not throw or claim the API key was saved', async () => {
+    const app = await makeAppHarness({}, {}, { storageDenied: true });
+    app.element('llm-api-key').value = SYNTHETIC_API_KEY;
+    await app.dispatch('llm-api-key', 'input');
+    assert.match(app.element('key-hint').textContent, /拒绝本地存储/);
+    assert.match(app.element('key-hint').textContent, /未保存/);
+    assert.equal(app.storageValues.has('timing-llm-api-key'), false);
   });
 
   test('four ready model groups ignore retired singing and SOFA readiness flags', async () => {
@@ -546,10 +694,10 @@ describe('shipped files', () => {
     const stamps = Array.from(html.matchAll(/\/static\/(?:styles\.css|ui-logic\.js|app\.js)\?v=([^"'&]+)/g),
       (match) => match[1]);
     assert.equal(stamps.length, 3, 'all three static assets must be versioned');
-    assert.deepStrictEqual([...new Set(stamps.map((stamp) => stamp.split('-')[0]))], ['0.22.0'],
-      'static assets must use the trusted-timestamp version');
+    assert.deepStrictEqual([...new Set(stamps.map((stamp) => stamp.split('-')[0]))], ['0.23.0'],
+      'static assets must use the word-transliteration version');
     for (const stamp of stamps) {
-      assert.match(stamp, /^0\.22\.0(?:-[0-9A-Za-z._-]+)?$/, 'cache busters must keep the current asset version');
+      assert.match(stamp, /^0\.23\.0(?:-[0-9A-Za-z._-]+)?$/, 'cache busters must keep the current asset version');
     }
   });
 
@@ -589,6 +737,17 @@ describe('shipped files', () => {
     assert.match(appSource, /show\('prompt-profile-settings', current\.showPromptProfile\)/);
   });
 
+  test('the word transliteration opt-in is an unchecked LLM checkbox with concise guidance', () => {
+    assert.ok(html.includes('id="word-transliteration-settings" class="local-settings hidden"'));
+    assert.ok(html.includes('for="word-transliteration"'));
+    assert.ok(html.includes('>输出逐字音译</label>'));
+    assert.match(html, /<input id="word-transliteration"[^>]*type="checkbox"/);
+    assert.ok(!/id="word-transliteration"[^>]*\bchecked\b/.test(html), 'the word opt-in must start off');
+    assert.match(html, /id="word-transliteration-hint"[^>]*>[^<]*逐行音译/);
+    assert.match(html, /id="word-transliteration-hint"[^>]*>[^<]*覆盖完整/);
+    assert.match(appSource, /show\('word-transliteration-settings', current\.showWordTransliteration\)/);
+  });
+
   test('LLM direct is presented as one full-track request with manual fallback', () => {
     assert.match(optionLabels(html, 'aligner')[2], /^LLM 整曲识别/);
     assert.ok(html.includes('id="language-settings"'), 'the language settings need a hideable container');
@@ -626,9 +785,13 @@ describe('shipped files', () => {
     assert.ok(generate.includes("data.set('lyrics', lyrics)"));
     assert.ok(generate.includes("data.set('audio_name', audio.name)"));
     assert.ok(generate.includes("data.set('llm_prompt_profile', profile)"));
+    assert.ok(generate.includes("data.set('word_transliteration', String(word))"));
     assert.ok(!generate.includes("data.set('audio'"));
     assert.ok(!generate.includes('llmData('));
     assert.ok(!check.includes('llmData('));
+    assert.ok(check.includes("data.set('word_transliteration', String(word))"));
+    assert.match(generate, /word !== \$\('word-transliteration'\)\.checked/);
+    assert.match(check, /word !== \$\('word-transliteration'\)\.checked/);
     assert.match(generate, /sequence !== promptSequence \|\| revision !== lyricsRevision \|\| profile !== \$\('llm-prompt-profile'\)\.value/);
     assert.match(check, /sequence !== checkSequence \|\| revision !== lyricsRevision \|\| resultRevisionAtStart !== resultRevision/);
     assert.ok(appSource.includes("invalidateImportBinding('歌词已更改"), 'lyrics edits must invalidate the prompt and check state');
@@ -646,6 +809,20 @@ describe('shipped files', () => {
     assert.ok(!handler.includes("$('llm-result').value ="));
     assert.ok(handler.includes('已保留当前结果文本'));
     assert.ok(handler.includes('只影响之后生成的提示词'));
+  });
+
+  test('word option changes persist, clear the prompt and mark the pasted result stale', () => {
+    const handler = appSource.slice(
+      appSource.indexOf("$('word-transliteration').addEventListener('change'"),
+      appSource.indexOf("$('english-splitter').addEventListener('change'")
+    );
+    assert.ok(handler.length > 0, 'the word option needs a change handler');
+    assert.ok(handler.includes("storage.set('word-transliteration', word)"));
+    assert.match(handler, /\+\+promptSequence; \+\+checkSequence/);
+    assert.match(handler, /promptText = ''/);
+    assert.ok(handler.includes('逐字音译设置已更改'));
+    assert.ok(handler.includes('已保留当前结果文本'));
+    assert.ok(!handler.includes("$('llm-result').value ="));
   });
 
   test('the page carries the background-lyrics note for the lead route', () => {
@@ -849,6 +1026,137 @@ describe('TTML conversion wiring', () => {
     assert.equal(app.element('lyrics').value, '保留的旧歌词');
     assert.equal(app.element('lyrics-status').textContent, '不支持的 TTML 时间表达式');
     assert.equal(app.element('lyrics-file-note').textContent, '');
+  });
+});
+
+describe('word transliteration wiring', () => {
+  const LRC = '[00:01]你好[00:03]';
+
+  test('the web import prompt and check send the opt-in state in both directions', async () => {
+    const app = await makeAppHarness();
+    app.element('aligner').value = 'llm_import';
+    app.element('lyrics').value = LRC;
+    await app.dispatch('lyrics', 'input');
+    await app.dispatch('aligner', 'change');
+
+    assert.equal(app.element('word-transliteration-settings').classList.contains('hidden'), false);
+    assert.equal(app.element('word-transliteration').disabled, false);
+    assert.equal(app.element('word-transliteration').checked, false);
+    assert.match(app.element('word-transliteration-hint').textContent, /逐行音译/);
+    assert.match(app.element('word-transliteration-hint').textContent, /旧结果/);
+
+    await app.dispatch('generate-prompt', 'click');
+    assert.equal(app.promptRequests.length, 1);
+    assert.equal(app.promptRequests[0].body.get('word_transliteration'), 'false');
+    assert.equal(app.element('llm-prompt').textContent, 'test prompt');
+
+    const legacyResult = '{"request_id":"test-request","items":[{"id":"line_001","parts":' +
+      '[{"text":"你好","lang":"zh","reading":"ni hao","roman":"ni hao","roman_lang":"zh-Latn"}]}]}';
+    app.element('llm-result').value = legacyResult;
+    await app.dispatch('llm-result', 'input');
+    await app.dispatch('validate-llm-result', 'click');
+    assert.equal(app.checkRequests.length, 1);
+    assert.equal(app.checkRequests[0].body.get('word_transliteration'), 'false');
+    assert.match(app.element('llm-result-status').textContent, /检查通过/);
+
+    app.element('word-transliteration').checked = true;
+    await app.dispatch('word-transliteration', 'change');
+    assert.equal(app.element('llm-prompt').textContent, '');
+    assert.match(app.element('word-transliteration-hint').textContent, /覆盖完整/);
+    assert.match(app.element('llm-prompt-status').textContent, /逐字音译设置已更改/);
+    assert.match(app.element('llm-result-status').textContent, /已保留当前结果文本/);
+    assert.equal(app.element('llm-result').value, legacyResult, 'the pasted result must stay put');
+
+    await app.dispatch('generate-prompt', 'click');
+    assert.equal(app.promptRequests.length, 2);
+    assert.equal(app.promptRequests[1].body.get('word_transliteration'), 'true');
+    assert.equal(app.element('llm-prompt').textContent, 'test prompt');
+    await app.dispatch('llm-result', 'input');
+    await app.dispatch('validate-llm-result', 'click');
+    assert.equal(app.checkRequests.length, 2);
+    assert.equal(app.checkRequests[1].body.get('word_transliteration'), 'true');
+  });
+
+  test('late prompt and validation replies cannot survive a word-option change', async () => {
+    const app = await makeAppHarness();
+    app.element('aligner').value = 'llm_import';
+    app.element('lyrics').value = LRC;
+    await app.dispatch('lyrics', 'input');
+    await app.dispatch('aligner', 'change');
+
+    const promptReply = deferred();
+    app.setPromptHandler(() => promptReply.promise);
+    const generating = app.dispatch('generate-prompt', 'click');
+    await app.settle();
+    assert.equal(app.promptRequests.length, 1);
+    assert.equal(app.promptRequests[0].body.get('word_transliteration'), 'false');
+
+    app.element('word-transliteration').checked = true;
+    await app.dispatch('word-transliteration', 'change');
+    promptReply.resolve(fakeResponse(200, { prompt: 'stale prompt', request_id: 'stale', lines: 1 }));
+    await generating;
+    await app.settle();
+    assert.equal(app.element('llm-prompt').textContent, '');
+    assert.match(app.element('llm-prompt-status').textContent, /逐字音译设置已更改/);
+
+    app.setPromptHandler(async () => fakeResponse(200, { prompt: 'word prompt', request_id: 'word', lines: 1 }));
+    await app.dispatch('generate-prompt', 'click');
+    assert.equal(app.element('llm-prompt').textContent, 'word prompt');
+    app.element('llm-result').value = '{"request_id":"word","items":[]}';
+    await app.dispatch('llm-result', 'input');
+
+    const checkReply = deferred();
+    app.setCheckHandler(() => checkReply.promise);
+    const checking = app.dispatch('validate-llm-result', 'click');
+    await app.settle();
+    assert.equal(app.checkRequests.length, 1);
+    assert.equal(app.checkRequests[0].body.get('word_transliteration'), 'true');
+
+    app.element('word-transliteration').checked = false;
+    await app.dispatch('word-transliteration', 'change');
+    checkReply.resolve(fakeResponse(200, { ok: true, lines: 1, accepted: 1, manual_lines: [] }));
+    await checking;
+    await app.settle();
+    assert.doesNotMatch(app.element('llm-result-status').textContent, /检查通过/);
+    assert.match(app.element('llm-result-status').textContent, /已保留当前结果文本/);
+    assert.equal(app.element('llm-result').value, '{"request_id":"word","items":[]}');
+  });
+
+  test('all LLM routes expose the option, but only LLM jobs submit it', async () => {
+    const jobs = [];
+    const job = { id: 'a'.repeat(32), state: 'running', name: 'song.wav', original_filename: 'song.wav',
+      download_name: 'song.ttml', queue_position: null, log: [], result: null, error: null };
+    const app = await makeAppHarness({}, {}, {
+      queue: async () => fakeResponse(200, { jobs, running: 0, waiting: 0, limit: 50 }),
+      submit: async () => { jobs.push(job); return fakeResponse(200, job); },
+      detail: async () => fakeResponse(200, job),
+    });
+    app.element('audio').files = [new File(['audio'], 'song.wav', { type: 'audio/wav' })];
+    app.element('lyrics').value = LRC;
+    await app.dispatch('lyrics', 'input');
+
+    for (const aligner of ['llm_text', 'llm_direct', 'llm_import']) {
+      app.element('aligner').value = aligner;
+      await app.dispatch('aligner', 'change');
+      assert.equal(app.element('word-transliteration-settings').classList.contains('hidden'), false, aligner);
+    }
+
+    app.element('aligner').value = 'llm_text';
+    app.element('word-transliteration').checked = true;
+    await app.dispatch('word-transliteration', 'change');
+    await app.dispatch('form', 'submit');
+    await app.settle();
+    assert.equal(app.submitRequests.length, 1);
+    assert.equal(app.submitRequests[0].body.get('word_transliteration'), 'true');
+
+    app.element('aligner').value = 'tifa';
+    await app.dispatch('aligner', 'change');
+    assert.equal(app.element('word-transliteration-settings').classList.contains('hidden'), true);
+    assert.equal(app.element('word-transliteration').checked, true, 'the hidden preference is retained');
+    await app.dispatch('form', 'submit');
+    await app.settle();
+    assert.equal(app.submitRequests.length, 2);
+    assert.equal(app.submitRequests[1].body.get('word_transliteration'), null);
   });
 });
 
@@ -1288,6 +1596,123 @@ describe('queue workflow wiring', () => {
     assert.equal(app.element('queue-summary').textContent, '0 处理中 · 0 等待 · 上限 50');
     assert.equal(queueState(app, FAILED), '处理失败');
     assert.equal(app.timerCount(), 0);
+  });
+});
+
+describe('task-file cleanup workflow', () => {
+  const DONE = 'c'.repeat(32);
+  const makeDone = (overrides = {}) => ({
+    id: DONE,
+    state: 'complete',
+    name: 'finished.wav',
+    original_filename: 'finished.wav',
+    download_name: 'finished.ttml',
+    queue_position: null,
+    log: [],
+    error: null,
+    result: {
+      lead_separated: true,
+      residual_includes_accompaniment: true,
+      source: 'separated_vocals',
+    },
+    available_files: ['ttml', 'report', 'lead', 'residual'],
+    ...overrides,
+  });
+
+  test('opening the panel previews the default scope and requires explicit confirmation', async () => {
+    let cleaned = false;
+    const app = await makeAppHarness({ task_file_cleanup: true }, {}, {
+      queue: async () => fakeResponse(200, { jobs: [makeDone()], running: 0, waiting: 0, limit: 50 }),
+      detail: async () => fakeResponse(200, makeDone()),
+      cleanupPreview: async (url) => {
+        assert.match(url, /[?&]mode=work(?:&|$)/);
+        return fakeResponse(200, cleaned
+          ? { mode: 'work', jobs: 0, files: 0, bytes: 0, token: 'after-clean' }
+          : { mode: 'work', jobs: 2, files: 17, bytes: 3 * 1024 ** 3, token: 'preview-work' });
+      },
+      cleanupRun: async (init) => {
+        cleaned = true;
+        assert.equal(init.headers['X-Timing-Token'], 'test-token');
+        assert.equal(init.headers['Content-Type'], 'application/json');
+        assert.deepEqual(JSON.parse(init.body), { mode: 'work', token: 'preview-work' });
+        return fakeResponse(200, { mode: 'work', jobs: 2, files: 17, bytes: 3 * 1024 ** 3, failed: 1 });
+      },
+    });
+    await app.settle(24);
+
+    assert.equal(app.element('cleanup-tools').classList.contains('hidden'), false);
+    assert.equal(app.element('cleanup-panel').classList.contains('hidden'), true);
+    await app.dispatch('open-cleanup', 'click');
+    await app.settle(24);
+
+    assert.equal(app.cleanupPreviewRequests.length, 1);
+    assert.equal(app.element('cleanup-preview').textContent,
+      '将按“只清理中间文件”清理 2 个已结束任务中的 17 个文件，预计释放约 3.00 GB。');
+    assert.equal(app.element('confirm-cleanup').disabled, true);
+    app.element('cleanup-ack').checked = true;
+    await app.dispatch('cleanup-ack', 'change');
+    assert.equal(app.element('confirm-cleanup').disabled, false);
+
+    await app.dispatch('confirm-cleanup', 'click');
+    await app.settle(60);
+    assert.equal(app.cleanupRunRequests.length, 1);
+    assert.match(app.element('cleanup-result').textContent, /已清理 2 个任务中的 17 个文件/);
+    assert.match(app.element('cleanup-result').textContent, /3\.00 GB/);
+    assert.match(app.element('cleanup-result').textContent, /另有 1 项未能清理/);
+    assert.equal(app.element('cleanup-result').classList.contains('warning'), true);
+    assert.equal(app.element('cleanup-ack').checked, false);
+    assert.equal(app.element('confirm-cleanup').disabled, true);
+    assert.equal(app.element('cleanup-preview').textContent, '当前范围内没有可清理的文件。');
+  });
+
+  test('a stale preview is rejected, re-estimated and confirmation is reset', async () => {
+    let previewCount = 0;
+    const app = await makeAppHarness({ task_file_cleanup: true }, {}, {
+      queue: async () => fakeResponse(200, { jobs: [], running: 0, waiting: 0, limit: 50 }),
+      cleanupPreview: async () => {
+        previewCount++;
+        return fakeResponse(200, { mode: 'work', jobs: 1, files: previewCount === 1 ? 4 : 5,
+          bytes: previewCount === 1 ? 4000 : 5000, token: 'token-' + previewCount });
+      },
+      cleanupRun: async () => fakeResponse(409, { detail: 'preview changed' }),
+    });
+    await app.settle(20);
+    await app.dispatch('open-cleanup', 'click');
+    await app.settle(24);
+    app.element('cleanup-ack').checked = true;
+    await app.dispatch('cleanup-ack', 'change');
+    await app.dispatch('confirm-cleanup', 'click');
+    await app.settle(60);
+
+    assert.equal(app.cleanupRunRequests.length, 1);
+    assert.equal(previewCount, 2, 'a stale cleanup token must trigger a fresh preview');
+    assert.match(app.element('cleanup-result').textContent, /预览后任务文件发生变化/);
+    assert.equal(app.element('cleanup-ack').checked, false);
+    assert.equal(app.element('confirm-cleanup').disabled, true);
+    assert.match(app.element('cleanup-preview').textContent, /5 个文件/);
+  });
+
+  test('available_files removes only stale WAV links and keeps exports download-ready', async () => {
+    const job = makeDone({ available_files: ['ttml', 'report', 'residual'] });
+    const app = await makeAppHarness({ task_file_cleanup: true }, {}, {
+      queue: async () => fakeResponse(200, { jobs: [job], running: 0, waiting: 0, limit: 50 }),
+      detail: async () => fakeResponse(200, job),
+    });
+    await app.settle(24);
+    const labels = app.element('links').children.map(link => link.textContent);
+    assert.ok(labels.includes('下载 TTML'));
+    assert.ok(labels.includes('对齐记录 JSON'));
+    assert.ok(labels.includes('下载伴奏及和声 WAV'));
+    assert.equal(labels.includes('下载主唱 WAV'), false);
+  });
+
+  test('the cleanup entry stays hidden when the running backend omits the capability', async () => {
+    const app = await makeAppHarness({}, {}, {
+      queue: async () => fakeResponse(200, { jobs: [], running: 0, waiting: 0, limit: 50 }),
+    });
+    await app.settle(20);
+    assert.equal(app.element('cleanup-tools').classList.contains('hidden'), true);
+    assert.equal(app.cleanupPreviewRequests.length, 0);
   });
 });
 
@@ -1826,6 +2251,7 @@ function defineContractTests(api) {
       assert.deepStrictEqual({ ...api.submissionFields(result) }, {
         language: 'auto', aligner: 'llm_text', audio_mode: 'lead',
         syllables: 'false', english_splitter: 'syllabify', trust_line_timestamps: 'false',
+        word_transliteration: 'false',
       });
     });
 
@@ -1859,6 +2285,7 @@ function defineContractTests(api) {
         english_splitter: 'syllabify',
         trust_line_timestamps: 'false',
         llm_prompt_profile: 'fine',
+        word_transliteration: 'false',
       });
     });
 
@@ -1889,6 +2316,7 @@ function defineContractTests(api) {
         english_splitter: 'syllabify',
         trust_line_timestamps: 'false',
         llm_prompt_profile: 'fine',
+        word_transliteration: 'false',
       });
       assert.equal(resolve({ aligner: 'llm_import', lyrics: lyrics({ anchored: false, kind: 'txt' }) }).promptReady, false);
     });
@@ -1906,6 +2334,25 @@ function defineContractTests(api) {
         const result = resolve({ aligner, promptProfile: 'original' });
         assert.equal(result.showPromptProfile, false, aligner + ' must hide the prompt profile');
         assert.ok(!('llm_prompt_profile' in api.submissionFields(result)), aligner + ' must not submit a prompt profile');
+      }
+    });
+
+    test('word transliteration is an LLM-only opt-in that defaults off', () => {
+      for (const aligner of ['llm_text', 'llm_direct', 'llm_import']) {
+        const off = resolve({ aligner });
+        assert.equal(off.showWordTransliteration, true, aligner + ' must show the word option');
+        assert.equal(off.wordTransliteration, false, aligner + ' must default the word option off');
+        assert.equal(api.submissionFields(off).word_transliteration, 'false', aligner);
+
+        const on = resolve({ aligner, wordTransliteration: true });
+        assert.equal(on.wordTransliteration, true, aligner + ' must honor the word opt-in');
+        assert.equal(api.submissionFields(on).word_transliteration, 'true', aligner);
+      }
+      for (const aligner of ['auto', 'tifa', 'ctc']) {
+        const result = resolve({ aligner, wordTransliteration: true });
+        assert.equal(result.showWordTransliteration, false, aligner + ' must hide the word option');
+        assert.equal(result.wordTransliteration, false, aligner + ' must ignore a stale word opt-in');
+        assert.ok(!('word_transliteration' in api.submissionFields(result)), aligner + ' must leave the backend default');
       }
     });
   });
@@ -2102,7 +2549,8 @@ function defineContractTests(api) {
       const result = resolve({});
       const flags = ['showLanguage', 'valid', 'showEnglish', 'showSplitter', 'allowLlmSplitter', 'syllables',
         'llm', 'sendsAudio', 'showImport',
-        'showPromptProfile', 'promptReady', 'trustEligible', 'trustLineTimestamps', 'hasBackground'];
+        'showPromptProfile', 'showWordTransliteration', 'wordTransliteration', 'promptReady',
+        'trustEligible', 'trustLineTimestamps', 'hasBackground'];
       for (const key of flags) {
         assert.equal(typeof result[key], 'boolean', key + ' must be a boolean');
       }

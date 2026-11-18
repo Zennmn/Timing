@@ -4,7 +4,7 @@ import pytest
 
 from timing.schema import Line, Unit
 from timing.text import tokenize, parse_lyrics
-from timing.ttml import export, stamp, TT, TTM, ITUNES
+from timing.ttml import export, stamp, TT, TTM, ITUNES, XML
 
 
 @pytest.mark.parametrize("text", ["君の名前 beautiful world!", "今日も I love you, forever.", "名前を呼んで！", "　愛してる。  Hello & goodbye!", "きゃっと、キャット。", "Don't stop — 2026年", "🎵君とme♪"])
@@ -64,6 +64,71 @@ def test_ttml_roundtrip_spaces_escaping_overlaps_background():
     spans = list(ps[0])
     assert spans[0].attrib[f"{{{TTM}}}role"] == "x-bg"
     assert "".join(x.text for x in spans[1:]) == "Hello & you"
+
+
+@pytest.mark.parametrize(("language", "expected"), [
+    ("ja", "ja"), ("en", "en"), ("zh", "zh-CN"),
+    ("zh-en", "mul"), ("mixed", "mul"), ("auto", "und"),
+])
+def test_song_language_only_export_uses_root_language_and_omits_line_languages(language, expected):
+    line = Line("hello", language="en", words=[Unit("hello", "hello", start=1, end=2)])
+    root = ET.fromstring(export([line], 5, language, include_line_languages=False))
+    assert root.attrib[f"{{{XML}}}lang"] == expected
+    assert all(f"{{{XML}}}lang" not in p.attrib for p in root.findall(f".//{{{TT}}}p"))
+
+
+def test_llm_finish_exports_only_song_level_language(tmp_path):
+    from timing.reporting import finish
+    line = Line("hello", language="en", words=[Unit("hello", "hello", start=.1, end=.8)])
+    finish([line], 1, "ja", "test", tmp_path,
+           {"source": "original", "aligner": "llm_direct"}, lambda _: None)
+    root = ET.parse(tmp_path / "lyrics.ttml").getroot()
+    paragraph = root.find(f".//{{{TT}}}p")
+    assert root.attrib[f"{{{XML}}}lang"] == "ja"
+    assert paragraph is not None and f"{{{XML}}}lang" not in paragraph.attrib
+
+
+def test_non_llm_export_keeps_per_line_language_by_default():
+    line = Line("hello", language="en", words=[Unit("hello", "hello", start=1, end=2)])
+    root = ET.fromstring(export([line], 5, "ja"))
+    paragraph = root.find(f".//{{{TT}}}p")
+    assert paragraph is not None and paragraph.attrib[f"{{{XML}}}lang"] == "en"
+
+
+def test_tifa_auto_language_uses_audio_selected_pronunciation(tmp_path):
+    from timing.reporting import finish
+    from timing.tifa import detect_selected_language
+    raw = {"results": [{"selected": [
+        {"phonemes": ["en/HH", "en/AH"]}, {"phonemes": ["en/L"]},
+    ]}]}
+    assert detect_selected_language(raw) == "en"
+    assert detect_selected_language({"results": [{"selected": [
+        {"phonemes": ["ja/k"]}, {"phonemes": ["en/HH"]},
+    ]}]}) == "mixed"
+    assert detect_selected_language({"results": [{"selected": [{"phonemes": ["ja/k"]}]}]}) == "ja"
+    line = Line("hello", language="mixed", words=[Unit("hello", "hello", start=.1, end=.8)])
+    report = {"source": "original", "aligner": "tifa",
+              "tifa": {"detected_language": "en"}}
+    finish([line], 1, "mixed", "test", tmp_path, report, lambda _: None)
+    root = ET.parse(tmp_path / "lyrics.ttml").getroot()
+    assert root.attrib[f"{{{XML}}}lang"] == "en"
+    assert f"{{{XML}}}lang" not in root.find(f".//{{{TT}}}p").attrib
+    assert report["language"] == "en"
+    assert report["language_detection"] == "tifa_selected_pronunciation"
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+    ("hello world", "en"), ("こんにちは", "ja"), ("Hello こんにちは", "mul"),
+    ("你好 Hello", "und"),
+])
+def test_ctc_auto_language_uses_script_fallback_at_song_root(tmp_path, text, expected):
+    from timing.reporting import finish
+    line = Line(text, language="auto", words=[Unit(text, text, start=.1, end=.8)])
+    report = {"source": "original", "aligner": "ctc"}
+    finish([line], 1, "mixed", "test", tmp_path, report, lambda _: None)
+    root = ET.parse(tmp_path / "lyrics.ttml").getroot()
+    assert root.attrib[f"{{{XML}}}lang"] == expected
+    assert f"{{{XML}}}lang" not in root.find(f".//{{{TT}}}p").attrib
 
 
 @pytest.mark.parametrize("start,end", [(0, 0), (2, 1), (0, 6), (float("nan"), 2), (1, 1.0001)])

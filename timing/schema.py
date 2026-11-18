@@ -16,6 +16,8 @@ class Unit:
     end: float | None = None
     flags: list[str] = field(default_factory=list)
     source_pronunciation: str = ""
+    roman: str = ""
+    roman_lang: str = ""
 
 
 @dataclass

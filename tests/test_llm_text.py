@@ -16,7 +16,7 @@ from timing.schema import Line, Unit
 
 
 def en(text='hi', phones=('hh', 'ay')):
-    return {'text': text, 'lang': 'en', 'reading': list(phones)}
+    return {'text': text, 'lang': 'en', 'reading': list(phones), 'roman': text, 'roman_lang': 'en-Latn'}
 
 
 def reply(items):
@@ -169,7 +169,7 @@ def test_supplied_hint_does_not_restrict_model_language(tmp_path, inventory, mon
     monkeypatch.setattr(llm_direct, 'kana_converter', lambda: converter)
     monkeypatch.setattr(llm_direct, 'phone_inventory', lambda: frozenset({'ja/h', 'ja/a', 'ja/i'}))
     monkeypatch.setattr(llm_text, 'local_parts', lambda _: pytest.fail('valid inferred reading must not fall back'))
-    parts = [{'text': 'hi', 'lang': 'ja', 'reading': 'ハイ'}]
+    parts = [{'text': 'hi', 'lang': 'ja', 'reading': 'ハイ', 'roman': 'hi', 'roman_lang': 'en-Latn'}]
     session = session_for(tmp_path, lambda _: reply([{'id': 'line_001', 'parts': parts}]))
     line = Line('hi', 0, 1, language=hint)
     session.prepare([line])
@@ -230,8 +230,8 @@ def test_japanese_text_success_bypasses_unidic_and_is_compiled_with_native_phone
         pytest.skip('native TIFA vocabulary not installed')
     monkeypatch.setattr(japanese_dictionary, 'dictionary_dir', lambda: pytest.fail('successful text reading must bypass UniDic'))
     monkeypatch.setattr(llm_text, 'local_parts', lambda *_: pytest.fail('no fallback needed'))
-    parts = [{'text': '今日', 'lang': 'ja', 'reading': 'キョー'},
-             {'text': 'は', 'lang': 'ja', 'reading': 'ワ'}]
+    parts = [{'text': '今日', 'lang': 'ja', 'reading': 'キョー', 'roman': 'kyou', 'roman_lang': 'ja-Latn'},
+             {'text': 'は', 'lang': 'ja', 'reading': 'ワ', 'roman': 'wa', 'roman_lang': 'ja-Latn'}]
     session = session_for(tmp_path, lambda _: reply([{'id': 'line_001', 'parts': parts}]))
     session.prepare([Line('今日は', 0, 1, language='en')])
     record = session.records[0]
@@ -268,7 +268,7 @@ def test_pipeline_dispatches_text_records_to_local_tifa(tmp_path, inventory, mon
     monkeypatch.setattr(pipeline, 'prepare_sources', lambda *a, **kw:
                         AudioSources(wave, 16000, tmp_path / 'a.wav', wave, tmp_path / 'a.wav', 'original'))
     session = session_for(tmp_path, lambda _: reply([{'id': 'line_001', 'parts': [en()]}]))
-    monkeypatch.setattr(llm_text, 'TextReadingSession', lambda *a: session)
+    monkeypatch.setattr(llm_text, 'TextReadingSession', lambda *a, **kw: session)
     monkeypatch.setattr(alignment, 'decode', lambda *a, **kw: (wave, 16000))
     seen = []
     monkeypatch.setattr(llm_direct, 'locate', lambda *a: [{'start': 0, 'end': 1}])

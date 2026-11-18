@@ -18,11 +18,12 @@ from timing.schema import Line
 
 
 def zh(text, reading):
-    return {'text': text, 'lang': 'zh', 'reading': reading}
+    roman={'你':'ni','好':'hao','爱':'ai','年':'nian','2024':'er qian ling er shi si'}.get(text,'jie')
+    return {'text': text, 'lang': 'zh', 'reading': reading, 'roman': roman, 'roman_lang': 'zh-Latn'}
 
 
 def en(text, phones):
-    return {'text': text, 'lang': 'en', 'reading': phones.split()}
+    return {'text': text, 'lang': 'en', 'reading': phones.split(), 'roman': text, 'roman_lang': 'en-Latn'}
 
 
 ZH_SYLLABLES = ('ni', 'hao', 'ai', 'shi', 'jie', 'er', 'qian', 'ling', 'si', 'nv', 'nian', 'ne')
@@ -56,7 +57,7 @@ def test_compile_parts_chinese_per_character_display_and_tones_normalized(zh_inv
     assert [p['reading'] for p in parts] == ['ni', 'hao']
     assert parts[0]['groups'] == chinese.pinyin_groups('ni')
     assert parts[1]['groups'] == chinese.pinyin_groups('hao')
-    assert all(set(p) == {'text', 'lang', 'reading', 'groups'} for p in parts)
+    assert all(set(p) == {'text', 'lang', 'reading', 'groups', 'roman', 'roman_lang'} for p in parts)
     assert all(g['phones'] for p in parts for g in p['groups'])
 
 
@@ -114,7 +115,8 @@ def test_coarse_units_chinese_use_roman_pinyin_labels_without_timing(zh_inventor
 
 def test_direct_session_chinese_parts_detected_language_and_audit(tmp_path, zh_inventory):
     lines = [Line('你好', 0, 2, language='zh'), Line('爱你 baby', 2, 4, language='zh-en')]
-    session = DirectSession(LlmConfig('https://fixture.example/v1', 'mimo-v2.6-pro', 'private-key'), lambda _: None, tmp_path)
+    session = DirectSession(LlmConfig('https://fixture.example/v1', 'mimo-v2.6-pro', 'private-key'),
+                            lambda _: None, tmp_path, word_transliteration=True)
     calls = []
     def handler(request):
         body = json.loads(request.content)
@@ -139,7 +141,7 @@ def test_direct_session_chinese_parts_detected_language_and_audit(tmp_path, zh_i
     assert 'private-key' not in json.dumps(audit)
     for record in audit['lines']:
         for part in record['parts']:
-            assert set(part) == {'text', 'lang', 'reading', 'groups'}
+            assert set(part) == {'text', 'lang', 'reading', 'groups', 'roman', 'roman_lang'}
     assert lines[0].start == 0 and lines[0].end == 2
 
 
